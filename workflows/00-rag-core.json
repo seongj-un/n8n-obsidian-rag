@@ -1,0 +1,483 @@
+{
+  "name": "Obsidian RAG — ⓪ RAG 코어",
+  "nodes": [
+    {
+      "id": "sub-0001",
+      "name": "호출됨",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -320,
+        300
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "question",
+              "type": "string"
+            },
+            {
+              "name": "rawQuestion",
+              "type": "string"
+            },
+            {
+              "name": "contextBlock",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "notes": "입출력 계약. question 은 **검색·게이트·선별이 쓸** 질문이고, rawQuestion 은 답변 프롬프트의 \"질문:\" 자리에 들어갈 사용자 원문이다. ② 는 맥락 재작성 때문에 둘이 갈리고, ④ 는 같다. contextBlock 은 ② 후속질문의 [대화 맥락] 블록 — ④ 는 빈 문자열."
+    },
+    {
+      "id": "sub-0002",
+      "name": "입력 정리",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -100,
+        300
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "q",
+              "name": "question",
+              "type": "string",
+              "value": "={{ $json.question }}"
+            },
+            {
+              "id": "rq",
+              "name": "rawQuestion",
+              "type": "string",
+              "value": "={{ $json.rawQuestion || $json.question }}"
+            },
+            {
+              "id": "cb",
+              "name": "contextBlock",
+              "type": "string",
+              "value": "={{ $json.contextBlock || '' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "선언하지 않은 입력은 null 로 온다(ExecuteWorkflowTrigger 의 FALLBACK_DEFAULT_VALUE). rawQuestion 이 비면 question 으로, contextBlock 이 비면 빈 문자열로 떨어뜨려 ④ 가 두 필드를 보내지 않아도 ② 와 같은 프롬프트가 나오게 한다."
+    },
+    {
+      "parameters": {
+        "mode": "load",
+        "tableName": "n8n_vectors",
+        "options": {},
+        "topK": 16,
+        "prompt": "={{ $json.question }}"
+      },
+      "id": "sub-0003",
+      "name": "Obsidian Vector Store",
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePGVector",
+      "typeVersion": 1.3,
+      "position": [
+        120,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "3kFMNEUFEXo3asRo",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "2026-09-14: topK 8→16, 예산 5000→8500. 정답 노트가 top-8에 1청크만 올라와 답변이 곁가지를 본론인 양 설명하던 문제(리랭킹 알려줘)를 고친다. 근거 판정은 창을 top-8로 못박아 두었으므로 이 변경에 영향받지 않는다."
+    },
+    {
+      "parameters": {
+        "model": "bge-m3:latest"
+      },
+      "id": "sub-0004",
+      "name": "Embeddings Ollama",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOllama",
+      "typeVersion": 1,
+      "position": [
+        120,
+        500
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "D4QGeNfmYV2N9zyL",
+          "name": "Ollama (host.docker.internal)"
+        }
+      }
+    },
+    {
+      "id": "sub-0005",
+      "name": "Pack Docs",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        340,
+        300
+      ],
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "docs",
+        "include": "allFields",
+        "options": {}
+      },
+      "notes": "집계는 아이템을 하나로 합치므로 **한 번에 질문 하나만** 들어와야 한다. 호출부는 Execute Workflow 를 아이템 1개로 부른다(④ 는 Loop batchSize 1)."
+    },
+    {
+      "id": "sub-0006",
+      "name": "질문 되붙이기",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        560,
+        300
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "q",
+              "name": "question",
+              "type": "string",
+              "value": "={{ $('입력 정리').first().json.question }}"
+            },
+            {
+              "id": "rq",
+              "name": "rawQuestion",
+              "type": "string",
+              "value": "={{ $('입력 정리').first().json.rawQuestion }}"
+            },
+            {
+              "id": "cb",
+              "name": "contextBlock",
+              "type": "string",
+              "value": "={{ $('입력 정리').first().json.contextBlock }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "집계 노드가 질문 문자열을 삼킨다(출력 키가 docs 하나뿐). 예전에는 `근거 판정`·`노트 선별` 이 $('맥락 재작성')/$('Loop Over Questions') 를 뒤져 이를 메웠는데, 그 노드들은 이제 서브워크플로 밖에 있다. 여기서 되붙이면 두 JS 의 getQuestion() 이 첫 줄($json.question)에서 끝나므로 **JS 를 한 글자도 고치지 않아도 된다.**"
+    },
+    {
+      "id": "sub-0007",
+      "name": "근거 판정",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ],
+      "notes": "2026-09-15 4세대: 거리 3절에 어휘 절을 더했다. 거리 특징끼리는 상관이 높아 OUT 분포 안쪽의 오차단을 못 꺼낸다. 질문 내용어가 회수된 청크에 문자 그대로 나오는지를 직교축으로 쓴다. 기존 절은 그대로라 통과 판정은 안 바뀐다.",
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── 근거 판정 (4세대) ─────────────────────────────────────────────────────────\n// 3세대(거리+낙폭)에 **어휘 절**을 하나 더한 것. 1~3세대 로직과 상수는 그대로 두고\n// OR 로 절만 추가했다 — 기존에 통과하던 질문의 판정은 한 건도 바뀌지 않는다.\n//\n// 왜 어휘인가: best / best2mean / spread 는 전부 같은 거리 공간에서 나와 서로 상관이\n// 높다(|r| 0.4~0.6). 임계값을 아무리 굴려도 OUT 분포 안쪽에 박힌 IN 은 못 꺼낸다.\n// 직교하는 축이 필요하다 — \"질문의 내용어가 회수된 청크에 **문자 그대로** 나오는가\".\n//   데드락            → study/deadlock.md 본문에 \"데드락\" 이 그대로 있다\n//   코사인/BM25       → 각 노트에 그대로 있다\n//   sparse / M2       → dev/docs-rag-m2.md 에 그대로 있다\n//   러스트/스위프트    → 볼트 어디에도 없다\n// 측정: IN 57 / OUT 22 표본에서 OUT 최대 lexHit = 0.750, 오차단 3건은 모두 1.000.\n// [2026-09-15 측정 — IN 57 / OUT 22 / 적대적 스트레스 20]\n//   골든 오차단 3 → 0 · 음성 대조군 누수 0 → 0 · 골든 27문항 27/27\n//   대가: 적대적 스트레스 통과 6/20 → 8/20. 새로 열린 2건은\n//     \"트랜잭션 로그 파일 크기 관리\" (진짜 누수 — 흔한 단어만으로 다 적중)\n//     \"정렬 알고리즘 병렬 구현\" (sorting.md 가 볼트에 있어 애매)\n//   볼트 어휘로만 된 질문에는 약하다. 실제 사용자 질문 3건을 살리는 값으로 받아들였다.\n//\n// [한계 — 손대기 전에 읽을 것]\n//   · OUT 22건 위에서 잰 \"누수 0\" 이다. 표본이 작다.\n//   · LEX 의 실제 여유는 \"토큰 1개\" 다. 0.75~1.00 이 전부 같은 규칙(\"미적중 0개\")이고\n//     0.75 로 내리면 즉시 누수 2건. 숫자 여유 0.15 는 착시다.\n//   · OUT \"도커 이미지 레이어 캐시\" 는 노트가 \"Docker\" 라 한글 \"도커\" 가 미적중해서\n//     우연히 막혔다. 음차 매핑(도커↔docker)을 추가하면 그 순간 샌다 — 하지 마라.\n//   · FAR2 는 측정된 값이 아니다. 이 표본에서 0.60~0.70 아무 값이나 성적이 같다.\n//   · 성능이 STOP 리스트에 의존한다. 다만 목록이 모자라면 구제를 못 받을 뿐 누수로는\n//     가지 않는다(어휘 절이 안 켜지고 3세대 동작으로 되돌아간다). 코퍼스가 아니라\n//     한국어 문법에 대한 의존이라 재색인해도 안 깨진다.\nconst NEAR  = 0.420;   // 1차 절대컷\nconst FAR   = 0.58;    // 2차 절대 상한\nconst FALL  = 0.098;   // 2차 낙폭컷\nconst FAR2  = 0.62;    // 어휘 절 절대 상한 (데드락 b2m=0.5707 에 여유 0.049)\nconst LEX   = 0.90;    // 어휘 절 컷 — 사실상 \"내용어가 하나도 안 빠졌는가\"(1.0)\n                       // 평탄 구간 0.75 < LEX <= 1.0. 0.75 에서는 누수 2건이 난다.\nconst WINDOW = 8;      // 거리 특징(best/best2mean/spread)이 보는 창. 3세대부터 고정.\n// 어휘는 더 좁게 본다. 측정상 top-4~8 이 전부 (오차단 0, 누수 0, 구제 3/3) 로 같은데\n// top-10 부터 누수가 시작된다. 8은 그 경계 바로 앞이라 6으로 두 칸 물러섰다 — 비용 0이다.\nconst LEX_WINDOW = 6;\n\n// ── 한국어 휴리스틱 토크나이저 (형태소 분석기 없이) ──────────────────────────\n// 꼬리(조사/어미) — 긴 것부터, 1회만 제거. 2회 돌리면 \"유사도랑\"→\"유사\" 로 과제거된다.\nconst TAILS = [\"이랑\",\"에서\",\"으로\",\"에게\",\"한테\",\"부터\",\"까지\",\"보다\",\"처럼\",\"마다\",\"대로\",\n  \"밖에\",\"조차\",\"라도\",\"이나\",\"하고\",\"에는\",\"과는\",\"와는\",\"이란\",\"라는\",\"이라\",\n  \"은지\",\"는지\",\"한지\",\"인지\",\"이야\",\"예요\",\"이에\",\"해줘\",\"해야\",\"하는\",\n  \"랑\",\"와\",\"과\",\"은\",\"는\",\"이\",\"가\",\"을\",\"를\",\"의\",\"에\",\"도\",\"만\",\"로\",\"다\",\n  \"요\",\"야\",\"지\",\"고\",\"서\",\"며\",\"면\",\"나\",\"까\",\"죠\",\"네\",\"군\",\"데\",\"해\",\"라\",\"게\",\"걸\",\"건\"];\n// 질문 골격어 — 꼬리를 뗀 뒤 정확히 일치하면 버린다.\n// 주의: 이 목록이 비면 어휘 절이 거의 발동하지 않는다(= 3세대로 되돌아간다).\n// 목록이 모자라서 생기는 실패는 항상 \"통과시켜야 할 걸 막는\" 쪽이다 — 누수로는 안 간다.\nconst STOP = new Set((\"뭐 뭘 뭔 뭐야 뭐가 뭔지 무슨 무엇 어떻 어떻게 어떤 어디 언제 누가 얼마 얼마나 왜 \" +\n  \"알려 알려줘 설명 설명해 정리 가르쳐 말해 얘기 이야기 \" +\n  \"차이 다른 다르 달라 비교 각각 중에 중 골라 골라야 선택 고르 골랐 \" +\n  \"써 쓰 쓸 쓴 쓰나 쓰면 쓰는 써야 썼어 썼 사용 적용 \" +\n  \"필요 이유 방법 관계 정확 자꾸 헷갈 헷갈리 그냥 그리고 좀 진짜 혹시 대해 대한 관련 \" +\n  \"에서 으로 에게 한테 부터 까지 보다 처럼 이랑 하고 \" +\n  \"것 거 게 건 걸 수 때 때문 경우 정도 부분 내용 문제 이거 그거 저거 이런 그런 \" +\n  \"있어 없어 되나 되는 된다 맞아 맞나 인가 일까 할까 하면 한다 이란 라면\").split(/\\s+/));\n\nconst RUN = /[가-힣]+|[A-Za-z0-9]+(?:[-+.][A-Za-z0-9]+)*/g;\n\nfunction contentTokens(q) {\n  const out = [], seen = new Set();\n  const runs = String(q || \"\").match(RUN) || [];\n  for (const run of runs) {\n    let t = run, latin = /^[A-Za-z0-9]/.test(run);\n    if (latin) {\n      t = t.toLowerCase();\n    } else {\n      for (const tl of TAILS) {                       // 꼬리 1회만 제거\n        if (t.length > tl.length && t.endsWith(tl)) { t = t.slice(0, -tl.length); break; }\n      }\n    }\n    if (t.length < 2 || STOP.has(t)) continue;\n    if (!seen.has(t)) { seen.add(t); out.push({ t, latin }); }\n  }\n  return out;\n}\n\nfunction esc(s) { return s.replace(/[.*+?^${}()|[\\]\\\\]/g, \"\\\\$&\"); }\nfunction hit(tok, latin, hay) {\n  if (!latin) return hay.indexOf(tok) !== -1;\n  // 영문/숫자는 단어 경계로 — \"m2\" 가 \"m20\" 에 걸리지 않게\n  return new RegExp(\"(?:^|[^a-z0-9])\" + esc(tok) + \"(?![a-z0-9])\").test(hay);\n}\n\n// lexHit = 내용어 중 창 안 청크 **본문 또는 노트 경로**에 그대로 나타나는 비율\nfunction lexHitOf(question, win) {\n  const toks = contentTokens(question);\n  if (!toks.length) return { lexHit: 0, nTok: 0 };\n  const hays = win.map(d => ((body(d).pageContent || body(d).text || \"\") + \" \" +\n                             (srcOf(d) || \"\")).toLowerCase());\n  let n = 0;\n  for (const { t, latin } of toks) if (hays.some(h => hit(t, latin, h))) n++;\n  return { lexHit: n / toks.length, nTok: toks.length };\n}\n\n// ── 문서 형태 흡수 ───────────────────────────────────────────────────────────\nfunction body(d) {\n  if (!d || typeof d !== \"object\") return {};\n  return (d.document && typeof d.document === \"object\") ? d.document : d;\n}\nfunction srcOf(d) {\n  const m = body(d).metadata;\n  return (m && m.source) ? m.source : null;\n}\nfunction r4(v) { return Math.round(v * 1e4) / 1e4; }\n\n// ── 본체 ────────────────────────────────────────────────────────────────────\nconst j = (typeof $json !== \"undefined\" && $json) ? $json : $input.first().json;\nconst raw = Array.isArray(j.docs) ? j.docs : [];\n// 게이트 바로 앞이 집계 노드(Build Context / Pack Docs)라 질문 문자열이 흘러오지 않는다\n// (2026-09-15 실측: Pack Docs 출력 키가 docs 하나뿐이다). 상류에서 직접 가져온다.\n// ② 는 '맥락 재작성'(없으면 '질문 정리'), ④ 는 'Loop Over Questions' 가 갖고 있다.\n// 맥락 재작성이 앞에 오는 이유: 검색을 **재작성된 질문**으로 했으므로 어휘 절도 같은 질문으로\n// 재야 한다. 원문(\"그건 왜 비싸?\")으로 재면 내용어가 1개뿐이라 lexHit 이 0 또는 1 로\n// 튀어 게이트가 우연에 좌우된다. 이 워크플로에 맥락 재작성이 없으면 그대로 '질문 정리' 로 떨어진다.\nfunction getQuestion(src) {\n  if (typeof src.question === \"string\" && src.question) return src.question;\n  for (const name of [\"맥락 재작성\", \"질문 정리\", \"Loop Over Questions\"]) {\n    try {\n      const v = $(name).first().json.question;\n      if (typeof v === \"string\" && v) return v;\n    } catch (e) { /* 이 워크플로에는 없는 노드 */ }\n  }\n  return \"\";\n}\nconst question = getQuestion(j);\n\n// 출처 줄: 창 안에 등장하는 노트를 거리 오름차순 등장 순서로 앞 3개\nconst seen = [];\nfor (const d of raw.slice(0, WINDOW)) {\n  const s = srcOf(d);\n  if (s && seen.indexOf(s) === -1) seen.push(s);\n}\nconst sourcesLine = seen.slice(0, 3).join(\", \") || \"없음\";\n\nconst scored = raw.filter(d => d && typeof d === \"object\" &&\n  typeof d.score === \"number\" && isFinite(d.score));\n\nlet out;\nif (!scored.length) {\n  out = { grounded: false, best: null, best2mean: null, spread: null,\n          nearest: \"없음\", sourcesLine };\n} else {\n  const asc = scored.slice().sort((a, b) => a.score - b.score).slice(0, WINDOW);\n  const best = asc[0].score;\n  const best2mean = asc.length >= 2 ? (asc[0].score + asc[1].score) / 2 : best;\n  const spread = asc[asc.length - 1].score - best;\n  const { lexHit, nTok } = lexHitOf(question, asc.slice(0, LEX_WINDOW));\n\n  const grounded = best2mean < NEAR\n                || (best2mean < FAR  && spread > FALL)\n                || (best2mean < FAR2 && lexHit >= LEX);      // ← 새 어휘 절\n\n  out = { grounded, best: r4(best), best2mean: r4(best2mean), spread: r4(spread),\n          nearest: srcOf(asc[0]) || \"없음\", sourcesLine,\n          lexHit: r4(lexHit), lexTokens: nTok };             // 관측용(하류는 안 읽음)\n}\n\nout.noGroundMessage =\n  \"🔍 노트에서 관련 내용을 찾지 못했어요.\\n\\n\" +\n  \"검색은 됐지만 결과가 전부 질문과 거리가 멀어서(가장 가까운 노트 `\" +\n  (out.nearest || \"없음\") + \"`), 지어내지 않고 멈췄습니다.\";\n\nreturn [{ json: { ...j, ...out } }];\n"
+      }
+    },
+    {
+      "id": "sub-0008",
+      "name": "근거 있나?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "g",
+              "leftValue": "={{ $json.grounded }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "sub-0009",
+      "name": "노트 선별",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1220,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// top-K를 노트 단위로 걸러 원문 순서로 되돌린다. DB를 다시 치지는 않는다.\n//\n// [왜 필요한가]\n// topK 16은 거리와 무관하게 늘 16개를 준다. 청크가 거리순이라 한 노트의 앞뒤가 무관한 노트를\n// 사이에 두고 끊긴다. 2026-09-11: HNSW 문항이 ef_construction/ef_search 를 답변에서 빠뜨렸는데\n// 정작 그 값이 든 심화 청크는 이미 회수돼 있었다. 회수가 아니라 배치가 문제였다.\n//\n// [2026-09-14 수정 — 청크 수로 뽑던 것을 거리로 바꿨다]\n// 처음엔 \"top-K에서 2청크 이상 차지한 노트만 남긴다\"는 규칙이었다(1청크짜리는 골든 질문\n// 12개 전부에서 노이즈였으므로). 이게 틀렸다. 관련성을 거리가 아니라 슬롯 점유 수로 판정하는\n// 셈이라, 거리는 가까운데 청크를 적게 가진 정답 노트가 탈락한다.\n//   실행 2110 \"리랭킹 알려줘\" — 거리 2위인 정답 노트가 버려지고 더 먼 노트가 들어갔다.\n// 그래서 노트를 best 거리로 줄 세우고, 1위 대비 BAND 안에 드는 노트만 추가한다.\n//\n// ── [2026-09-15 수정 — 비교형 질문에만 BAND 를 넓힌다] ──────────────────────\n// 단일 BAND 1.08 은 \"답이 두 노트에 걸친 질문\"을 구조적으로 못 푼다. 비교형은 두 주제가\n// 서로 다른 노트에 있고, 질문 임베딩은 둘 중 한쪽으로 쏠린다. 그 결과 2위 노트가 1위의\n// 1.09~1.34배로 밀려 BAND 밖으로 떨어진다. 측정(골든 27문항, 549청크/94노트):\n//\n//   질문                          2위(또는 3위) expect 노트          1위 대비   1.08에서\n//   CSRF랑 CORS가 헷갈리는데       study/csrf.md                     1.1412    탈락\n//   카프카랑 RabbitMQ 중에         study/kafka.md                    1.1665    탈락\n//   bge-m3는 다른 임베딩 모델이랑   study/embeddings.md               1.2233    탈락\n//   JWT를 세션 쿠키 대신           study/jwt-token-management.md     1.3354    탈락\n//   하이브리드 서치랑 리랭킹        study/retrieval-reranking.md      1.0926    탈락\n//                                study/hybrid-search.md            1.1174    탈락\n//\n//   CSRF 문항은 컨텍스트에 CORS 만 들어가 모델이 \"CSRF 설명이 없어 비교 불가\"로 거절했고\n//   ④ 평가 0/0/0, 종합 4.98 → 4.80. 하이브리드 문항은 더 나빴다 — expect 두 개가 다\n//   떨어지고 1위였던 무관 노트 dev/docs-rag-m2.md 하나만 컨텍스트에 들어갔다.\n//\n// [왜 BAND 단독 상향이 아닌가 — 같은 회수율에서 정밀도가 다르다]\n//   설정                          expect 회수  무관 노트/질의  평균 ctx\n//   현재 1.08 (전체)                22/28       0.23          3,780자\n//   단순상향 1.25 (전체)             27/28       0.55          4,756자\n//   비교형만 1.28 (채택)             27/28       0.36          4,512자   ← 노이즈 35% 적다\n//   절대거리컷 best<=0.48            27/28       1.00          5,348자\n//   2위전용 BAND2 1.34              26/28       0.55          4,634자\n// 비교형이 아닌 12문항은 선별 결과가 배포본과 **한 글자도 안 바뀐다**(무관 0.33 동일).\n// 대가는 비교형 10문항에서만 발생한다: 무관 노트 0.10 → 0.40/질의.\n//\n// [왜 1.28 인가 — 평탄 구간의 한가운데]\n//   회수 27/28 은 BAND_CMP ∈ [1.2233, 1.3272] 전 구간에서 동일하다. 폭 0.104.\n//   (이 경계는 이 파일 자체를 node 로 돌려서 확인했다 — 1.2232 → 26/28, 1.3273 → 무관 0.36→0.41)\n//     아래 경계 1.2233 = study/embeddings.md (이 값 밑이면 26/28로 떨어진다)\n//     위 경계   1.3272 = study/process-and-thread.md 가 CSRF 문항에 노이즈로 끼어드는 값\n//   1.28 의 여유는 아래 0.0567 / 위 0.0472. 예전에 코퍼스 변경으로 깨졌던 임계값의\n//   여유가 0.0055 였다 — 그보다 한 자릿수 크다.\n// [28/28 을 노리지 않은 이유 — 과적합]\n//   28/28 은 BAND_CMP >= 1.3355(JWT 한 문항)에서만 열리고, 위로는 1.3663에서 곧바로\n//   노이즈가 늘기 시작한다. 쓸 수 있는 폭이 0.031 뿐이고 **한 문항이 가르는 값**이다.\n//   게다가 1.34 로 올리면 CSRF 문항에 study/process-and-thread.md 가 딸려 들어온다 —\n//   하필 CSRF/CORS 혼동을 풀어달라는 질문에 프로세스/스레드 노트를 얹는 셈이다.\n//   JWT 문항은 선별이 아니라 회수 문제로 본다(2위 노트가 정말 33% 멀다). 여기서 안 고친다.\n//\n// [예산도 함께 올렸다 — 8500 이면 BAND 를 올려도 소용이 없다]\n//   카프카 문항: rabbitmq.md 6,688자 + kafka.md 2,955자 = 9,643자 > 8500 → kafka 탈락\n//   하이브리드 문항: 6,108자 + hybrid-search.md 2,549자 = 8,657자 > 8500 → 탈락\n//   즉 BAND 를 1.40 까지 올려도 8500 에서는 26/28 이 천장이다. 필요한 최소값은 9,643.\n//   캐시된 79질의 전체에서 이 설정이 만드는 최대 컨텍스트가 10,363자(스프링 시큐리티 문항)라,\n//   11000 은 사실상 아무 데도 안 물린다 — MAX_CTX 를 20000 으로 놔도 결과가 같다.\n//   평탄 구간 [9643, ∞), 아래 여유 1,357자.\n//\n// [비용]\n//   평균 컨텍스트 3,780 → 4,512자 (+19%). 한국어 약 2.14자/토큰(로컬 토크나이저 실측)이므로\n//   평균 +약 340토큰, 최악(카프카 문항) 6,596 → 9,491자 = +약 1,350토큰.\n//   Gemini Flash Lite 의 실제 prefill 증가는 **측정하지 않았다** — 배포 후 확인할 것.\n//\n// [음성 대조군]\n//   이 노드는 `근거 있나?` 통과분만 받는다. 캐시된 OUT 22건(골든 음성 대조군 5건 포함)은\n//   전부 `근거 판정`에서 차단되므로(재현 확인: 차단 22 / 누수 0) BAND 변경의 영향이 0이다.\n//   비교형 판정이 OUT 9건에 켜지지만 그 질의들은 여기까지 오지 못한다.\n//\n// [버린 대안]\n//   MAX_NOTES 4: 회수 이득 0, 무관 노트 0.36 → 0.59. 기각.\n//   절대거리컷(best <= 0.48): 같은 27/28 에 무관 노트 1.00 — 비율컷보다 3배 시끄럽다.\n//   2위전용 BAND2: 3위에 있는 expect(embeddings.md, hybrid-search.md)를 구조적으로 못 집는다.\nconst BAND     = 1.08;   // 기본 — 비교형이 아닌 질문. 배포본과 동일하게 유지한다.\nconst BAND_CMP = 1.28;   // 비교형 질문. 평탄 구간 [1.22337, 1.32720] 의 거의 한가운데(중앙 1.2753).\nconst MAX_NOTES = 3;\nconst MAX_CTX_CHARS = 11000;  // 2026-09-15: 8500 → 11000. 8500 은 BAND 상향을 무력화한다.\n\n// ── 비교 신호 휴리스틱 ──────────────────────────────────────────────────────\n// 형태소 분석기 없이 \"두 주제를 나란히 놓는 질문인가\"만 본다.\n// 의도적으로 **중복**시켜 놨다: 골든 27문항에서 아래 아홉 갈래 중 **어느 하나를 빼도\n// 회수 27/28 이 그대로다**. 한 토큰에 성능이 걸려 있지 않다는 뜻이다.\n// 오판의 방향도 안전하다 —\n//   미탐(비교형인데 못 잡음) → BAND 1.08 로 되돌아간다 = 지금 배포본과 같은 동작\n//   오탐(아닌데 잡음)       → BAND 가 넓어져 무관 노트가 한둘 늘 뿐, 정답은 안 잃는다\n// 알려진 오탐: `과/와` 는 접속 조사라 \"결과 \", \"효과 \" 같은 명사 꼬리에도 걸린다.\n//   캐시 79질의 중 `과/와` 로만 비교형이 되는 건 1건(\"러스트의 소유권과 빌림 규칙\")이고\n//   그건 음성 대조군이라 여기 도달하지 않는다. 그래도 새 오탐이 나오면 이 갈래부터 의심할 것.\nconst CMP = new RegExp(\n  \"[가-힣A-Za-z0-9]랑(?![가-힣])\"   + \"|\" +   // 카프카랑 / 유사도랑\n  \"[가-힣A-Za-z0-9]이랑\"            + \"|\" +   // 모델이랑\n  \"[가-힣A-Za-z0-9](?:와|과)(?=\\\\s|$)\" + \"|\" + // 카프카와 RabbitMQ / CORS과\n  \"\\\\bvs\\\\b\"                       + \"|\" +\n  \"차이|다른|다르|달라|비교|중에|헷갈|대신\", \"i\");\n\n// 선별 노드 앞이 집계 노드(Build Context)라 질문 문자열이 흘러오지 않을 수 있다.\n// `근거 판정` 노드와 같은 패턴 — ② 는 '맥락 재작성'(없으면 '질문 정리'), ④ 는 'Loop Over Questions'.\nfunction getQuestion(src) {\n  if (src && typeof src.question === \"string\" && src.question) return src.question;\n  for (const name of [\"맥락 재작성\", \"질문 정리\", \"Loop Over Questions\"]) {\n    try {\n      const v = $(name).first().json.question;\n      if (typeof v === \"string\" && v) return v;\n    } catch (e) { /* 이 워크플로에는 없는 노드 */ }\n  }\n  return \"\";\n}\n\nconst j = (typeof $json !== \"undefined\" && $json) ? $json : $input.first().json;\nconst question = getQuestion(j);\nconst isCompare = CMP.test(question);\n// 질문을 못 구하면(=빈 문자열) isCompare 는 false → BAND 1.08 = 현재 배포본 동작.\nconst band = isCompare ? BAND_CMP : BAND;\n\nconst docs = Array.isArray(j.docs) ? j.docs : [];\nconst body = (d) => d.document || d;\nconst srcOf = (d) => (body(d).metadata || {}).source || null;\nconst lineOf = (d) => (((body(d).metadata || {}).loc || {}).lines || {}).from || 0;\n\n// 옵시디언 위키링크는 본문에 파일명을 끌고 들어온다. 형식 규칙에 \"출처 쓰지 말 것\"이라고\n// 적어두긴 했지만 프롬프트로 부탁할 일이 아니다 — 근거 판정과 같은 이유로 여기서 걷어낸다.\nconst unlink = (s) => String(s || '').replace(/\\[\\[([^\\]|]*\\|)?([^\\]]*)\\]\\]/g, '$2');\n\nconst owned = {};\nfor (const d of docs) {\n  const s = srcOf(d);\n  if (s) (owned[s] = owned[s] || []).push(d);\n}\n\nconst rank = Object.keys(owned)\n  .map((s) => ({ src: s, best: Math.min(...owned[s].map((d) => (typeof d.score === 'number' ? d.score : Infinity))) }))\n  .filter((x) => isFinite(x.best))\n  .sort((a, b) => a.best - b.best);\n\nlet picked = [];\nif (rank.length === 0) {\n  picked = docs.slice(0, 3);            // 점수가 없다 — 근거 판정이 이미 막았어야 할 모양\n} else {\n  const limit = rank[0].best * band;\n  let used = 0;\n  for (const r of rank.slice(0, MAX_NOTES)) {\n    if (picked.length && r.best > limit) break;   // 1위는 무조건, 나머지는 BAND 안일 때만\n    const chunks = owned[r.src].slice().sort((a, b) => lineOf(a) - lineOf(b));\n    const size = chunks.reduce((n, c) => n + (body(c).pageContent || '').length, 0);\n    if (picked.length && used + size > MAX_CTX_CHARS) break;\n    picked = picked.concat(chunks);\n    used += size;\n  }\n}\n\n// 받은 모양 그대로 돌려준다 — Answer 의 (d.document || d) 매핑이 계속 통해야 한다.\nconst out = picked.map((d) => {\n  const b = body(d);\n  const cleaned = { ...b, pageContent: unlink(b.pageContent) };\n  return d.document ? { ...d, document: cleaned } : cleaned;\n});\n\n// 출처 줄은 실제로 쓴 노트만 적는다. 근거 판정의 것은 top-8 전체라서 한 글자도 안 쓴 노트까지 걸렸다.\nconst usedSources = Array.from(new Set(out.map(srcOf).filter(Boolean)));\n\nreturn [{\n  json: {\n    ...j,\n    docs: out,\n    pickedNotes: usedSources,\n    pickedChunks: out.length,\n    ctxChars: out.reduce((n, d) => n + (body(d).pageContent || '').length, 0),\n    sourcesLine: usedSources.slice(0, 3).join(', ') || '없음',\n    pickBand: band,        // 관측용 — 하류는 안 읽는다\n    pickCompare: isCompare,\n  },\n}];\n"
+      },
+      "notes": "2026-09-15: 비교형 질문에만 BAND 1.08 → 1.28, 예산 8500 → 11000. 단일 BAND 는 답이 두 노트에 걸친 질문을 구조적으로 못 푼다 — 2위 노트가 1.09~1.34배로 밀려 잘린다. 예산도 함께 올려야 한다(8500 이면 BAND 를 1.40 까지 올려도 26/28 이 천장). 비교형이 아닌 문항은 선별이 한 건도 안 바뀐다."
+    },
+    {
+      "id": "sub-0010",
+      "name": "Answer",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1440,
+        200
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('입력 정리').first().json.contextBlock + '다음은 사용자의 Obsidian 노트에서 검색된 내용입니다.\\n\\n' + $json.docs.map(d => d.document || d).map(x => '[출처: ' + ((x.metadata || {}).source || '알 수 없음') + ']\\n' + (x.pageContent || '')).join('\\n\\n---\\n\\n') + '\\n\\n=====\\n질문: ' + $('입력 정리').first().json.rawQuestion + '\\n답변:' }}",
+        "batching": {},
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "당신은 사용자의 Obsidian 노트만 근거로 답하는 어시스턴트입니다.\n\n[근거 규칙]\n- 주어진 노트 내용만 근거로 답하세요. 추측 금지.\n- 노트에 있는 내용은 최대한 풍부하게 담으세요. 짧게 요약해버리지 말 것.\n- 근거가 없으면 (노트에서 관련 내용을 찾지 못했어요) 라고만 답하세요.\n\n[답변 모양 — 질문 종류를 보고 고른다]\n질문이 무엇을 묻는지 먼저 판단하고 아래 셋 중 맞는 모양을 쓴다.\n모든 답을 같은 틀에 찍어내지 마라. 불릿만 늘어놓는 답은 읽기 나쁘다.\n\n(가) 비교 — \"A랑 B 뭐가 달라\", \"언제 뭘 써\", \"차이\"\n핵심 한 문장으로 답한 뒤, 두 대상을 각각 굵은 이름으로 세워 나란히 대조한다.\n\n리랭킹은 임베딩이 추린 후보의 순서를 다시 매겨 정밀도를 올린다.\n\n**임베딩** — 미리 벡터화 · 수백만 개를 ms 단위로 · 재현율 담당\n**리랭킹** — 질문과 문서를 한 번에 입력 · 후보 수십 개만 · 정밀도 담당\n\n둘은 대체재가 아니라 이어 쓰는 2단계다. 1단계가 놓치면 2단계가 만회 못 한다.\n\n(나) 동작·절차 — \"어떻게 동작해\", \"어떤 순서로\", \"과정\"\n핵심 한 문장 뒤 번호 목록으로 단계를 밟는다. 각 단계는 한 줄.\n\nHNSW는 성긴 층에서 촘촘한 층으로 내려가며 가장 가까운 점을 찾는다.\n\n1. 맨 위 성긴 층의 진입점에서 시작한다\n2. 현 층에서 목표와 가장 가까운 노드로 이동한다\n3. 한 층 내려가 같은 탐색을 반복한다\n4. 맨 아래 층에서 ef_search 개의 후보를 확정한다\n\n(다) 정의·개념 — \"뭐야\", \"왜 필요해\", \"설명해줘\"\n두세 문장 산문으로 먼저 답한다. 그 뒤 꼭 필요한 것만 불릿 3~5개.\n\n캐시는 자주 쓰는 데이터를 더 빠른 저장소에 미리 두는 기법이다.\n히트하면 원본까지 안 가고 즉시 응답하고, 미스면 원본을 읽어 캐시에 채운다.\n\n- **지역성**: 최근 쓴 것이 또 쓰이고 근처 것이 함께 쓰인다는 전제\n- **무효화**: TTL로 만료시키거나 LRU로 오래된 것부터 밀어낸다\n- **쓰기 정책**: write-through는 안전하고 느리다, write-back은 반대\n\n[어느 모양이든 지키는 것]\n- 첫 줄은 핵심 한 문장. 굵게 표시하지 말 것\n- 한 줄은 70자 안쪽. 디스코드 폭에서 그 이상은 두 줄로 감겨 훑기 어렵다\n- 불릿을 쓸 때는 (- **용어**: 설명) 형태로 용어만 굵게\n- 노트에 트레이드오프·주의점·실무 팁이 있으면 마지막에 (- 💡 **주의**: ...) 1~2개\n- 전체 1500자 이내\n- 출처나 파일명은 쓰지 말 것 (시스템이 자동으로 붙임)"
+            }
+          ]
+        },
+        "needsFallback": true
+      },
+      "notes": "②·④ 의 프롬프트를 한 식으로 합쳤다. contextBlock 이 '' 이고 rawQuestion 이 question 과 같으면(=④) 만들어지는 문자열이 옛 ④ 프롬프트와 **바이트 단위로 같다**. 주 모델 Gemini, 폴백 gemma3:4b. retryOnFail 은 둘 다 죽었을 때만 돈다 — n8n 은 폴백을 노드 **안에서** 처리하므로 429 는 재시도가 아니라 폴백으로 간다.",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 30000
+    },
+    {
+      "id": "sub-0011",
+      "name": "Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        1380,
+        440
+      ],
+      "parameters": {
+        "modelName": "models/gemini-3.5-flash-lite",
+        "options": {
+          "temperature": 0.4,
+          "maxOutputTokens": 1200
+        }
+      },
+      "credentials": {
+        "googlePalmApi": {
+          "id": "MkK9a8qpz9PeN1xL",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      },
+      "notes": "2026-09-15: 주 모델. 골든 27문항에서 gemma3:4b 대비 4.43 vs 4.38, 답변 생성 11.9초 → 2.1초, 로컬 메모리 2.9GB → 0. 무료 티어는 분당 약 24건에서 429가 난다 — 봇은 하루 4건이라 무관하다."
+    },
+    {
+      "parameters": {
+        "model": "gemma3:4b",
+        "options": {
+          "numCtx": 8192,
+          "penalizeNewline": false,
+          "temperature": 0.4,
+          "keepAlive": "5m"
+        }
+      },
+      "id": "sub-0012",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        440
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "D4QGeNfmYV2N9zyL",
+          "name": "Ollama (host.docker.internal)"
+        }
+      },
+      "notes": "폴백. Gemini 무료 한도 소진·네트워크 장애 때 여기로 떨어진다. gemma3:4b 는 형식을 가끔 어기지만(답변 정리가 덮는다) 답은 나온다.\n2026-09-15: keepAlive 를 짧게 잡는다. 30m/4h 로 두면 평가가 끝난 뒤에도 qwen3:4b 3.8GB + bge-m3 0.67GB 가 계속 램에 남아 wired 가 7.5GB 까지 오른다. 실행 중에는 호출이 연달아 일어나므로 5m 로도 모델 교체가 생기지 않는다."
+    },
+    {
+      "id": "sub-0013",
+      "name": "결과 조립",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── 결과 조립 ────────────────────────────────────────────────────────────────\n// 두 갈래(근거 있음 → Answer / 근거 없음 → 바로 여기)가 합류한다. 호출부가 읽을 것을\n// 한 아이템에 평평하게 담아 돌려준다. 호출부는 서브워크플로 **안의 노드 이름을 몰라야**\n// 하므로($('근거 판정') 같은 참조가 호출부에 남으면 경계가 새는 것이다) 여기서 전부 꺼낸다.\n//\n// 근거 없음을 어떻게 넘기나 — 완성된 문장을 돌려주지 않고 `grounded:false` + `text:''` +\n// `noGroundMessage` 를 돌려준다. ② 는 출처 줄을 붙일지 말지를, ④ 는 채점 규칙(음성 대조군)\n// 을 그 플래그로 가른다. 서브워크플로가 문장을 완성해 버리면 ② 의 \"📄 출처: 없음\" 같은\n// 군더더기가 붙고 ④ 는 차단과 모델 거절을 구분하지 못한다.\nconst inp  = $input.first().json;\nconst gate = $('근거 판정').first().json;\nconst q    = $('입력 정리').first().json;\nconst packed = ($('Pack Docs').first().json || {}).docs || [];\n\nlet pick = null;\ntry { pick = $('노트 선별').first().json; } catch (e) { pick = null; }   // 근거 없음 갈래\n\nconst grounded = !!gate.grounded;\nconst text = grounded ? String(inp.text || '') : '';   // 차단됐으면 모델을 부르지 않았다\n\n// 리포트가 구성을 손으로 적지 않게 여기서 읽어 넘긴다(④ `Build Report`).\n// 코어가 옮겨왔으므로 ④ 의 `Start Run` 은 더 이상 이 노드들을 볼 수 없다.\nlet answerModel = '?', fallbackModel = '', topK = '?';\ntry { answerModel = String($('Gemini Chat Model').params.modelName || '?').split('/').pop(); } catch (e) {}\ntry { fallbackModel = String($('Ollama Chat Model').params.model || ''); } catch (e) {}\ntry { topK = $('Obsidian Vector Store').params.topK ?? '?'; } catch (e) {}\n\nreturn [{\n  json: {\n    question: q.question,            // 검색·게이트·선별이 실제로 쓴 질문\n    rawQuestion: q.rawQuestion,      // 사용자가 친 말 (② 후속질문에서 갈린다)\n    contextBlock: q.contextBlock,\n    text,                            // (②)(④) 근거 없음이면 ''\n    grounded,                        // (②)(④)\n    noGroundMessage: gate.noGroundMessage,   // (②)(④)\n    best: gate.best, best2mean: gate.best2mean, spread: gate.spread,  // (④)\n    nearest: gate.nearest,\n    lexHit: gate.lexHit === undefined ? null : gate.lexHit,\n    lexTokens: gate.lexTokens === undefined ? null : gate.lexTokens,\n    gateSourcesLine: gate.sourcesLine,       // top-8 기준 — 관측용\n    sourcesLine: pick ? pick.sourcesLine : gate.sourcesLine,   // (②) 실제로 쓴 노트\n    pickedNotes: pick ? pick.pickedNotes : [],\n    pickedChunks: pick ? pick.pickedChunks : 0,\n    ctxChars: pick ? pick.ctxChars : 0,\n    pickBand: pick ? pick.pickBand : null,\n    pickCompare: pick ? pick.pickCompare : null,\n    pickedDocs: pick ? pick.docs : [],       // 모델이 실제로 읽은 것 — 사후 대조용\n    docs: packed,                            // (④) 채점 근거는 선별 **전** top-16 이다\n    answerModel, fallbackModel, topK,        // (④) 리포트 표기\n  },\n}];\n"
+      },
+      "notes": "호출부가 읽는 것을 전부 여기서 만든다. 필드를 지우기 전에 ②·④ 를 grep 할 것."
+    }
+  ],
+  "connections": {
+    "호출됨": {
+      "main": [
+        [
+          {
+            "node": "입력 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "입력 정리": {
+      "main": [
+        [
+          {
+            "node": "Obsidian Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings Ollama": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Obsidian Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Obsidian Vector Store": {
+      "main": [
+        [
+          {
+            "node": "Pack Docs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pack Docs": {
+      "main": [
+        [
+          {
+            "node": "질문 되붙이기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "질문 되붙이기": {
+      "main": [
+        [
+          {
+            "node": "근거 판정",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "근거 판정": {
+      "main": [
+        [
+          {
+            "node": "근거 있나?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "근거 있나?": {
+      "main": [
+        [
+          {
+            "node": "노트 선별",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "결과 조립",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "노트 선별": {
+      "main": [
+        [
+          {
+            "node": "Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Answer",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Answer",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Answer": {
+      "main": [
+        [
+          {
+            "node": "결과 조립",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Seoul",
+    "errorWorkflow": "pkGMSzqV6YmmX8ZJ",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "_id": "5SsTbCLonpSETbMU"
+}

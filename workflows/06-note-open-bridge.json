@@ -1,0 +1,89 @@
+{
+  "name": "Obsidian RAG — ⑥ 노트 열기 다리",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "open",
+        "httpMethod": "GET",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "ob-hook",
+      "name": "열기 요청",
+      "webhookId": "d2b3c4e5-0000-4000-8000-0000000000aa"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// 받은 f(볼트 기준 상대경로)를 옵시디언 URI 로 바꿔 302 로 넘긴다.\n// VAULT/PREFIX 는 ② `출처 링크` 노드와 같은 값이어야 한다.\nconst VAULT  = 'LLM Wiki';\nconst PREFIX = 'wiki/';\nconst enc = (s) => encodeURIComponent(String(s));\nconst q = $json.query || {};\nconst f = String(q.f || '').replace(/^\\/+/, '');\n// 경로 탈출 차단 — 받은 값을 그대로 URI 에 싣기 전에 막는다.\nif (!f || f.includes('..') || /^[a-z]+:/i.test(f)) {\n  return [{ json: { ok: false, location: '', body: '잘못된 경로' } }];\n}\nconst target = 'obsidian://open?vault=' + enc(VAULT) + '&file=' + enc(PREFIX + f);\nreturn [{ json: { ok: true, location: target } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "ob-code",
+      "name": "URI 만들기",
+      "notes": "2026-09-15: Discord 는 마스크 링크 URL 로 http(s) 만 받는다(실측: obsidian:// 는 본문에서도 임베드에서도 글자 그대로 남았다). 그래서 http 로 받아 obsidian:// 로 넘겨주는 다리를 놓는다. 브라우저가 302 Location 의 커스텀 스킴을 OS 에 넘긴다. n8n 이 떠 있어야 동작하는데, 봇 자체가 n8n 위에서 돌기 때문에 새 의존성은 아니다."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.ok ? '' : $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.ok ? 302 : 400 }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Location",
+                "value": "={{ $json.location }}"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        0
+      ],
+      "id": "ob-resp",
+      "name": "넘기기"
+    }
+  ],
+  "connections": {
+    "열기 요청": {
+      "main": [
+        [
+          {
+            "node": "URI 만들기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "URI 만들기": {
+      "main": [
+        [
+          {
+            "node": "넘기기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "_id": "xxYdElTFEFn3L6X0"
+}

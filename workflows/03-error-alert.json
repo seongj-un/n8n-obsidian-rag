@@ -1,0 +1,60 @@
+{
+  "name": "Obsidian RAG — ③ 오류 알림",
+  "nodes": [
+    {
+      "id": "d542a4a6-bc75-4dda-ad95-24363beaa5d2",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "fe449a94-78f6-41f5-91f3-0d109a2b786c",
+      "name": "Discord로 알림",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "알림 자체가 실패하면 원래 오류가 사라진다. 재시도로 일시적 장애를 흡수한다.",
+      "parameters": {
+        "authentication": "webhook",
+        "content": "=🔴 **n8n 워크플로 실패** · {{ $json.workflow.name }}\n\n**실패 노드**: `{{ $json.execution.lastNodeExecuted || '알 수 없음' }}`\n**오류**: {{ $json.execution.error?.message || '메시지 없음' }}\n**시각**: {{ $now.toFormat('yyyy-MM-dd HH:mm:ss') }}\n\n{{ $json.execution.url }}",
+        "options": {}
+      },
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "kcmiYjIoc1VTEJsr",
+          "name": "Discord - PR Alerts Webhook"
+        }
+      },
+      "webhookId": "e4183262-ee68-49e0-a722-48986abb9841"
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Discord로 알림",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Seoul"
+  },
+  "_id": "pkGMSzqV6YmmX8ZJ"
+}

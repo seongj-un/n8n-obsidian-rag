@@ -1,0 +1,28 @@
+# ── 비밀 ────────────────────────────────────────────────────────────────
+# n8n 암호화 키. 이게 있어야 DB 의 크리덴셜을 복호화할 수 있다 — 절대 커밋 금지.
+*encryption-key*
+*.key
+.env
+
+# n8n DB 사본. 크리덴셜이 (암호화된 채) 들어 있고 수백 MB 다.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ── 작업 부산물 ─────────────────────────────────────────────────────────
+# 서브에이전트 작업 디렉터리. 실행 기록 덤프·DB 스냅샷이 섞여 있다(436MB).
+work-in-progress/
+
+# 워크플로 수정 전 스냅샷. 되돌리기용이라 로컬에만 둔다.
+backup/
+
+# 벤치 실험 산출물 (모델 출력·중간 JSON)
+bench/A*.json
+bench/B*.json
+bench/C*.json
+bench/D*.json
+bench/*.pyc
+bench/__pycache__/
+
+__pycache__/
+.DS_Store

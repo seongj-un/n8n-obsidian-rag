@@ -1,0 +1,54 @@
+services:
+  n8n:
+    # 태그를 고정한다. latest 로 두면 업그레이드가 조용히 끼어든다 —
+    # 2026-09-14 에 2.36.9 → 2.38.7 로 올라가며 Node 26 이 되었고,
+    # 커뮤니티 노드(n8n-nodes-discord-trigger)의 isolated-vm 이 프리빌드가 없어
+    # 컴파일을 시도하다 실패했다(하드닝 이미지에 빌드도구가 없다).
+    image: docker.n8n.io/n8nio/n8n:2.36.9
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=Asia/Seoul
+      - TZ=Asia/Seoul
+      - N8N_RESTRICT_FILE_ACCESS_TO=/home/node/vault
+      # 실행 기록 정리. 기본값은 '정리 안 함' 이라 DB 가 계속 자란다 —
+      # 2026-09-16 에 2,243건 중 2,091건이 꺼둔 GitHub 워크플로의 5분마다 실패한 기록이었고
+      # DB 가 239MB 였다(VACUUM 후 132MB). ② 는 이제 디스코드 메시지마다 실행이 하나씩 생긴다.
+      # DB 사본 뜨기(docker cp)가 유일한 백업 수단이라 크기가 곧 복구 속도다.
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=336            # 14일
+      - EXECUTIONS_DATA_PRUNE_MAX_COUNT=2000
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # 2026-09-16: :ro 를 뗀다. ⑤ 가 "못 답한 질문" 로그를 볼트에 노트로 남긴다.
+      # 쓰기는 N8N_RESTRICT_FILE_ACCESS_TO 로 이 경로 밖으로 못 나간다.
+      # 볼트 경로는 .env 에 VAULT_PATH 로 둔다 (.env.example 참조).
+      - "${VAULT_PATH}:/home/node/vault"
+    depends_on:
+      vectordb:
+        condition: service_healthy
+
+  # 옵시디언 RAG의 영속 벡터 인덱스.
+  # 호스트에 포트를 노출하지 않는다 — n8n만 쓰면 되고, 5432는 docs_rag-db-1이 점유 중이다.
+  # n8n에서는 같은 네트워크의 호스트명 vectordb:5432 로 접근한다.
+  vectordb:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: ${VECTORDB_PASSWORD}
+      POSTGRES_DB: obsidian_rag
+      TZ: Asia/Seoul
+    volumes:
+      - vectordb_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n -d obsidian_rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  n8n_data:
+  vectordb_data:

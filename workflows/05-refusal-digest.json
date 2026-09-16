@@ -1,0 +1,230 @@
+{
+  "name": "Obsidian RAG — ⑤ 거절 질문 주간 요약",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 9,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "d1e2f3a4-0001-4000-9000-refusesched01",
+      "name": "주 1회",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT kind, raw_question, question, norm_key, ctx_follow_up,\n       nearest, best2mean, spread, lex_hit, picked_notes, answer_lead,\n       user_hash, asked_at\nFROM rag_refusals\nWHERE asked_at >= now() - interval '7 days'\nORDER BY asked_at;",
+        "options": {}
+      },
+      "id": "d1e2f3a4-0002-4000-9000-refusequery1",
+      "name": "지난 7일 거절",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "3kFMNEUFEXo3asRo",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── 요약 만들기 ──────────────────────────────────────────────────────────────\n// 지난 7일 거절을 norm_key 로 묶어 빈도순으로 줄 세운다.\n//\n// [거절이 0건인 주에는 보내지 않는다]\n// 빈 배열을 돌려 Discord 노드를 아예 돌리지 않는다. \"이번 주 0건\" 은 할 일이 없다는\n// 뜻이고, 할 일 없는 알림이 매주 오면 할 일 있는 알림도 같이 안 읽히게 된다.\n// 봇이 죽어서 0건인 경우는 ③ 오류 알림이 따로 말해 준다 — 이 리포트가 할 일이 아니다.\n//\n// [종류(게이트/자체)로 나누지 않는다]\n// 사용자가 할 일은 둘 다 \"노트를 쓴다\" 로 같다. 갈라 놓으면 같은 주제가 두 절로 흩어져\n// 빈도가 낮아 보인다. 대신 **행동이 실제로 갈리는 축**으로 한 번만 가른다:\n//   새 노트  — 질문의 내용어가 볼트에 거의 없다(lexHit < 0.5). 없는 주제다.\n//   보강     — 어휘는 볼트에 있는데(lexHit >= 0.5) 막혔거나, 모델이 그 노트를 읽고도\n//              \"내용 없다\" 고 답했다. 노트는 있고 그 안의 **항목**이 빠진 것이다.\n// lexHit 을 쓰는 이유: ⓪ `근거 판정` 에서 거리(best2mean)와 직교하는 유일한 축이고,\n// 뜻이 그대로 \"질문의 내용어가 회수된 노트에 문자 그대로 나오는가\" 다. 거리 임계값으로\n// 가르면 \"쿠버네티스\"(0.60)와 \"러스트\"(0.53)가 갈리는데 둘 다 볼트에 없는 주제다.\nconst rows = $input.all().map((i) => i.json).filter((r) => r && r.norm_key);\nif (!rows.length) return [];\n\nconst LEX_HAS = 0.5;   // 내용어 절반 이상이 회수된 노트에 문자 그대로 있으면 \"볼트에 있다\"\n\nconst groups = new Map();\nfor (const r of rows) {\n  let g = groups.get(r.norm_key);\n  if (!g) {\n    g = { key: r.norm_key, n: 0, gate: 0, self: 0, qs: [], users: new Set(),\n          lex: [], nearest: new Map(), picked: new Map(), lead: '', last: 0 };\n    groups.set(r.norm_key, g);\n  }\n  g.n++;\n  if (r.kind === 'gate') g.gate++; else g.self++;\n  const q = String(r.raw_question || '').replace(/\\s+/g, ' ').trim();\n  if (q && g.qs.indexOf(q) === -1) g.qs.push(q);\n  if (r.user_hash) g.users.add(r.user_hash);\n  if (typeof r.lex_hit === 'number') g.lex.push(r.lex_hit);\n  const bump = (m, k) => { if (k && k !== '없음') m.set(k, (m.get(k) || 0) + 1); };\n  bump(g.nearest, r.nearest);\n  if (r.kind === 'self') { bump(g.picked, r.picked_notes); if (!g.lead) g.lead = r.answer_lead || ''; }\n  const t = new Date(r.asked_at).getTime();\n  if (isFinite(t) && t > g.last) g.last = t;\n}\n\nconst top = (m) => { let k = '', n = 0; for (const [a, b] of m) if (b > n) { k = a; n = b; } return k; };\nconst mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);\n\nconst list = [...groups.values()].map((g) => {\n  const lex = mean(g.lex);\n  // 자체 거절은 그 자체로 \"노트는 읽었는데 항목이 없다\" 는 뜻이라 무조건 보강이다.\n  const gap = g.self > 0 || (lex !== null && lex >= LEX_HAS);\n  return { ...g, lex, gap };\n})\n  // 많이 물은 것 먼저. 같은 횟수면 볼트에서 먼 것(= 더 확실히 없는 노트) 먼저.\n  .sort((a, b) => b.n - a.n || ((a.lex ?? 1) - (b.lex ?? 1)) || b.last - a.last);\n\nconst d = (ms) => new Date(ms + 9 * 3600e3).toISOString().slice(5, 10).replace('-', '/');\nconst now = Date.now();\nconst nNew = list.filter((g) => !g.gap).length;\nconst nGap = list.length - nNew;\n\nconst head = [\n  '🗒️ **못 답한 질문 주간 요약** · ' + d(now - 7 * 864e5) + '–' + d(now),\n  '거절 ' + rows.length + '건 · 서로 다른 질문 ' + list.length + '개' +\n    '  (새 노트 ' + nNew + ' · 기존 노트 보강 ' + nGap + ')',\n  '',\n];\n\nconst MAX = 12;\nconst body = list.slice(0, MAX).map((g, i) => {\n  const rep = g.qs[0] || g.key;\n  const times = g.n > 1 ? ' **×' + g.n + '**' : '';\n  const who = g.users.size > 1 ? ' · ' + g.users.size + '명' : '';\n  const l1 = (i + 1) + '. ' + (g.gap ? '🩹' : '🆕') + ' ' + rep.slice(0, 64) + times + who;\n\n  // 둘째 줄이 곧 할 일이다.\n  let l2;\n  if (g.self > 0) {\n    const note = top(g.picked) || top(g.nearest);\n    l2 = '   ' + (note || '?') + ' 를 읽고도 \"관련 내용 없다\" — 그 노트에 빠진 항목';\n  } else if (g.gap) {\n    l2 = '   ' + (top(g.nearest) || '?') + ' 에 어휘는 있다 — 그 노트를 보강 (어휘 ' +\n         (g.lex === null ? '?' : g.lex.toFixed(2)) + ')';\n  } else {\n    l2 = '   볼트에 없는 주제 (가장 가까운 노트 ' + (top(g.nearest) || '없음') + ')';\n  }\n  // 말만 바꿔 다시 물은 게 있으면 하나만 더 보여 준다 — 묶임이 맞는지 눈으로 검증된다.\n  const l3 = g.qs.length > 1\n    ? '   ↳ \"' + g.qs[1].slice(0, 48) + '\"' + (g.qs.length > 2 ? ' 외 ' + (g.qs.length - 2) : '')\n    : '';\n  return [l1, l2, l3].filter(Boolean).join('\\n');\n});\n\nconst tail = [];\nif (list.length > MAX) tail.push('… 외 ' + (list.length - MAX) + '개');\ntail.push('', '🆕 새로 쓸 노트  ·  🩹 있는 노트에 보탤 항목');\n\nconst content = head.concat(body).concat(tail).join('\\n');\n\n// ── 볼트 로그 블록 ─────────────────────────────────────────────────────────\n// 2026-09-16: Discord 로만 보내면 나중에 공부할 때 채널을 뒤져야 한다.\n// 같은 내용을 볼트에 노트로 남긴다 — 옵시디언 안에서 검색되고 링크된다.\n// 위키링크로 적어 해당 노트에서 역링크가 보이게 한다.\nconst wl = (p) => {\n  const base = String(p || '').split('/').pop().replace(/\\.md$/, '');\n  return base ? '[[' + base + ']]' : '?';\n};\nconst today = new Date(now + 9 * 3600e3).toISOString().slice(0, 10);\nconst logLines = list.map((g) => {\n  const rep = (g.qs[0] || g.key).slice(0, 70);\n  const times = g.n > 1 ? ` ×${g.n}` : '';\n  if (g.self > 0) {\n    return `- 🩹 ${rep}${times} — ${wl(top(g.picked) || top(g.nearest))} 보강 필요 (읽고도 \"관련 내용 없다\")`;\n  }\n  if (g.gap) {\n    return `- 🩹 ${rep}${times} — ${wl(top(g.nearest))} 보강 필요 (어휘 ${g.lex === null ? '?' : g.lex.toFixed(2)})`;\n  }\n  return `- 🆕 ${rep}${times} — 노트 필요 (가장 가까운 노트 ${wl(top(g.nearest))})`;\n});\nconst logBlock = logLines.length\n  ? `## ${today}\\n` + logLines.join('\\n') + '\\n'\n  : '';\n\nreturn [{ json: { content: content.slice(0, 1900), total: rows.length, groups: list.length,\n                  newNotes: nNew, gaps: nGap, logBlock, today } }];\n"
+      },
+      "id": "d1e2f3a4-0003-4000-9000-refusereport",
+      "name": "요약 만들기",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ $json.content }}",
+        "options": {}
+      },
+      "id": "d1e2f3a4-0004-4000-9000-refusediscor",
+      "name": "Discord로 요약",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ],
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "kcmiYjIoc1VTEJsr",
+          "name": "Discord - PR Alerts Webhook"
+        }
+      },
+      "webhookId": "f5a21ebd-35a6-482a-b357-7d7033cbf8c3"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/home/node/vault/rag-unanswered.md",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        520,
+        480
+      ],
+      "id": "vl-read",
+      "name": "기존 로그 읽기",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "notes": "파일이 없으면 오류 대신 빈 입력으로 흘려보낸다 — 첫 실행에 머리말부터 만든다."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 볼트 로그 합치기 ──────────────────────────────────────────────────────\n// `요약 만들기` 가 만든 이번 주 블록을 기존 로그 **맨 위**에 얹는다.\n// Discord 요약과 같은 내용이지만, 볼트에 두면 옵시디언 안에서 검색되고\n// 위키링크로 해당 노트에서 역링크가 보인다 — 나중에 공부할 때 그게 쓸모다.\n//\n// [입력]\n//   $input        `기존 로그 읽기` 의 binary.data — 파일이 없으면 비어 있다\n//                 (그 노드는 onError=continueRegularOutput 이라 없어도 안 멈춘다)\n//   요약 만들기    logBlock(이번 주 블록) · today(YYYY-MM-DD)\n// [출력]\n//   binary.data   합쳐진 파일 전문 — `볼트에 쓰기` 가 그대로 쓴다\n//   json          경로와 길이 (실행 기록에서 눈으로 확인하려고)\n\n// 파일이 없을 때 처음 만들 머리말. 여기 문구가 노트 맨 위에 남는다.\nconst HEAD = [\n  '# 못 답한 질문 로그',\n  '',\n  '> 봇이 답하지 못한 질문을 주 1회 쌓는다. 새 항목이 위에 온다.',\n  '> 🆕 = 볼트에 없는 주제 · 🩹 = 노트는 있는데 그 항목이 빠졌다',\n  '> 자동 생성 — `Obsidian RAG — ⑤ 거절 질문 주간 요약`',\n  '',\n].join('\\n');\n\nconst summary = $('요약 만들기').first().json;\nconst block = String(summary.logBlock || '');\n\n// 거절이 0건인 주에는 파일을 아예 건드리지 않는다.\n// 빈 항목을 남기면 로그가 \"아무 일도 없었다\" 로 채워져 읽을 값이 떨어진다.\nif (!block.trim()) {\n  return [];\n}\n\n// ── 기존 내용 읽기 ───────────────────────────────────────────────────────\n// 첫 실행이면 파일이 없다. 그 경우 binary 가 통째로 비어 예외가 나므로 삼킨다.\nlet existing = '';\ntry {\n  const bin = $input.first().binary && $input.first().binary.data;\n  if (bin) {\n    existing = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf-8');\n  }\n} catch (e) {\n  existing = '';\n}\n\nlet body = existing.trim() ? existing : HEAD;\n\n// ── 같은 날짜 블록은 갈아끼운다 ──────────────────────────────────────────\n// 수동 실행(webhook/refusal-digest-now)을 하루에 여러 번 돌려도\n// 같은 날짜가 여러 번 쌓이지 않게 한다. 다음 `## ` 직전까지가 한 블록이다.\nconst sameDay = new RegExp('^## ' + summary.today + '\\\\n[\\\\s\\\\S]*?(?=\\\\n## |$)', 'm');\nbody = body.replace(sameDay, '').replace(/\\n{3,}/g, '\\n\\n');\n\n// ── 맨 위에 얹기 ────────────────────────────────────────────────────────\n// 첫 날짜 블록 바로 앞에 끼운다. 블록이 하나도 없으면(=첫 실행) 끝에 붙인다.\nconst firstBlock = body.indexOf('\\n## ');\nconst merged = firstBlock >= 0\n  ? body.slice(0, firstBlock + 1) + block + '\\n' + body.slice(firstBlock + 1)\n  : body.replace(/\\s*$/, '\\n\\n') + block;\n\n// 끝을 늘 개행 하나로 맞춘다. 이게 없으면 실행마다 파일 끝이 1바이트씩 흔들려\n// 옵시디언 동기화가 매번 변경으로 잡는다.\nconst text = merged.replace(/\\s*$/, '\\n');\n\nconst fileName = 'rag-unanswered.md';\nreturn [{\n  json: { path: '/home/node/vault/' + fileName, bytes: text.length },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      Buffer.from(text, 'utf-8'), fileName, 'text/markdown'),\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        480
+      ],
+      "id": "vl-merge",
+      "name": "로그 합치기",
+      "notes": "최신 블록을 맨 위에. 같은 날짜가 이미 있으면 갈아끼워 수동 재실행이 중복을 만들지 않게 한다."
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "/home/node/vault/rag-unanswered.md",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        480
+      ],
+      "id": "vl-write",
+      "name": "볼트에 쓰기",
+      "notes": "N8N_RESTRICT_FILE_ACCESS_TO=/home/node/vault 라 이 경로 밖으로는 못 쓴다."
+    },
+    {
+      "parameters": {
+        "path": "refusal-digest-now",
+        "httpMethod": "POST",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        480
+      ],
+      "id": "vl-hook",
+      "name": "수동 실행",
+      "webhookId": "f4d5e6a7-0000-4000-8000-0000000000cc",
+      "notes": "주 1회를 기다리지 않고 돌려 보려고 둔다. curl -XPOST localhost:5678/webhook/refusal-digest-now"
+    }
+  ],
+  "connections": {
+    "주 1회": {
+      "main": [
+        [
+          {
+            "node": "지난 7일 거절",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "지난 7일 거절": {
+      "main": [
+        [
+          {
+            "node": "요약 만들기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "요약 만들기": {
+      "main": [
+        [
+          {
+            "node": "Discord로 요약",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "기존 로그 읽기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "기존 로그 읽기": {
+      "main": [
+        [
+          {
+            "node": "로그 합치기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "로그 합치기": {
+      "main": [
+        [
+          {
+            "node": "볼트에 쓰기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "수동 실행": {
+      "main": [
+        [
+          {
+            "node": "지난 7일 거절",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "pkGMSzqV6YmmX8ZJ"
+  },
+  "_id": "T2cQPMcuuh97wfyX"
+}

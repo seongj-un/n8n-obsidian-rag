@@ -13,6 +13,7 @@
 | `04-quality-eval` | 골든 60문항으로 답변 품질을 주 1회 측정 |
 | `05-refusal-digest` | 못 답한 질문을 모아 주간 요약 + 볼트에 노트로 기록 |
 | `06-note-open-bridge` | 디스코드 출처 링크를 `obsidian://` 로 넘기는 다리 |
+| `07-ram-alert` | 호스트 램이 쪼이면 디스코드로 알린다 (트리거는 `host/` 에 있다) |
 
 ## 스택
 
@@ -51,8 +52,48 @@ docker compose up -d
 workflows/   n8n 워크플로 정의 (API 로 내보낸 것)
 bench/       오프라인 측정 하네스. parity.py 가 배포본과 동작 일치를 검사한다
 initdb/      pgvector 초기화 SQL
+host/        호스트(macOS)에서 도는 것. 지금은 램 감시기 하나
 docker-compose.yml
 ```
+
+## 호스트 램 감시 (⑦)
+
+n8n 은 컨테이너 안이라 **호스트 16GB 가 아니라 도커 VM 의 2.9GB 를 "전체 램"으로 본다.**
+그래서 맥북 램은 n8n 워크플로 안에서 잴 수 없고, 재는 쪽이 호스트여야 한다.
+
+```
+launchd (5분마다)
+  └ host/ram-watch.sh          vm_stat 으로 실여유 % 를 센다
+      └ 상태가 바뀔 때만 POST  http://localhost:5678/webhook/ram-alert
+          └ ⑦ → 디스코드       ③ 과 같은 Webhook 크리덴셜을 재활용
+```
+
+```sh
+host/install.sh      # 설치 (~/.local/bin 으로 복사 후 launchd 등록)
+host/uninstall.sh    # 제거
+tail -f /tmp/n8n-ram-watch.log
+```
+
+- **판정**: 둘 중 **하나라도** 걸리면 압박.
+
+  | 조건 | 기본값 | 환경변수 |
+  |---|---|---|
+  | **실여유** % | < 12% | `RAM_REAL_FREE_THRESHOLD` |
+  | `kern.memorystatus_vm_pressure_level` | warn 이상 | — |
+
+  **실여유 = 100 − (wired + 익명 + 압축기점유) / 전체.** `vm_stat` 에서 직접 센다.
+  디스코드 메시지에는 그냥 `여유 N%` 로 찍힌다 — 표시되는 값이 곧 이 실여유다.
+  `memory_pressure` 의 '여유 %' 는 **쓰지 않는다** — 압축기가 물고 있는 물리 램을
+  사용으로 치지 않아 수십 %p 낙관적이다 (측정 시점: 여유 49% ↔ 실여유 20%,
+  압축기가 30% = 약 5GB 점유). 실여유는 항상 그 값보다 작으므로, 낮은 쪽 하나만 본다.
+- `vm_stat` 을 못 읽으면 실여유 조건은 **빠지고** 커널 압박 단계만 남는다 — 없는 근거로 알리지 않는다.
+- **메시지 본문**은 프로세스 목록이 아니라 wired / 익명 / 압축기 **내역**이다.
+  `ps` 상위 목록은 못 쓴다 — wired(2.8GB)와 압축기(5.3GB)가 어느 프로세스에도 안 잡혀서
+  메모리순 상위 5개를 다 더해도 1.9GB, 실사용 12.7GB 의 15% 밖에 설명하지 못한다.
+- **도배 방지**: `ok ↔ alert` 가 **바뀔 때만** 보낸다. 5분마다 같은 말을 하지 않는다.
+- **n8n 이 내려가 있으면** POST 가 실패하고 상태를 기록하지 않는다 → 다음 번에 다시 시도한다.
+- `ram-watch.sh` 를 고치면 **`install.sh` 를 다시 돌려야** 반영된다.
+  레포가 `~/Desktop` 아래라 macOS TCC 가 막아서, launchd 는 레포 안의 파일을 직접 못 읽는다.
 
 ## 워크플로 되돌리기
 

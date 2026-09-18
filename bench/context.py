@@ -21,12 +21,24 @@
       contextBlock + prompt_v1.build(rawQuestion, docs)[1]
   이다. `ab.py --pairs` 가 그 모양을 그대로 만든다.
 
-  [후속 판정 — 두 갈래]
+  [후속 판정 — 세 갈래]
     ① 내용어가 0개              → 이 질문만으로는 검색어를 만들 수 없다
     ② REF 가 있고 내용어 ≤ 1개  → 지시어가 빠진 자리를 앞 차례가 채운다
-  CONN(그럼/그러면/그래서/근데 …)은 **방아쇠가 아니다**. 앞 차례를 잇기만 할 뿐 가리키지
-  않아서, 넣으면 "그럼 임베딩은 뭐야?"(주제 전환)에 직전 주제가 덧붙어 검색이 오염된다.
-  CONN 은 내용어가 0일 때(규칙 ①) 비로소 의미를 갖는다.
+    ③ CONT 가 있고 **내용어가 전부 CONT** → 되풀이 요청. 주제는 앞 차례에 있다
+  CONT(자세히/더/계속/예시 …)는 앞 차례를 **되풀이해 달라는 요청**이라 주제어를 하나도
+  담지 않는다. rag_refusals 44·45·46 이 근거다(2026-09-16). ③ 의 문턱은 개수가 아니라
+  **0** 이다 — `임베딩 더 자세히 알려줘` 처럼 새 주제가 하나라도 섞이면 방아쇠가 안 걸린다.
+  CONN(그럼/그러면/그래서/근데 …)은 **1차 방아쇠가 아니다**. 앞 차례를 잇기만 할 뿐
+  가리키지 않아서, 넣으면 "그럼 임베딩은 뭐야?"(주제 전환)에 직전 주제가 덧붙어 검색이
+  오염된다. CONN 은 내용어가 0일 때(규칙 ①) 비로소 의미를 갖는다.
+
+  [재검색 — 2026-09-15 추가]
+  1차 판정이 "후속이 아니다" 로 끝났는데 **게이트가 막으면**, ② 가 맥락을 붙여 한 번 더
+  검색한다. 그 두 번째 질문을 이 모듈이 미리 만들어 `ctxRetryQuestion` 으로 내보낸다.
+  이 값은 1차 검색에 한 글자도 영향을 주지 않는다 — 1차 출력 10키는 바이트 그대로다.
+  거기서는 CONN 도 방아쇠다. 오염이 없는 이유는 규칙이 아니라 순서다: 오염될 질문
+  ("그럼 임베딩은 뭐야?")은 1차에서 게이트를 통과하므로 재검색 자체가 돌지 않는다.
+  **재검색을 실제로 돌릴지는 여기가 아니라 ② `재검색 판정`(IF) 이 게이트 결과로 정한다.**
 
   [파이썬으로 옮기면서 특별히 맞춘 것 — 아래 "JS↔파이썬 함정" 절 참고]
     · 토크나이저는 `rag.py` 의 것을 **그대로 가져다 쓴다**(복제하지 않는다).
@@ -47,6 +59,7 @@ from rag import TAILS, STOP, _RUN, _LATIN
 TTL_S = 600        # 세션 수명(초)
 MAX_TOPIC = 3      # 직전 주제어를 몇 개까지 끌어올지
 CONTENT_MAX = 1    # REF 가 있을 때, 내용어가 이 개수 이하면 후속으로 본다
+RETRY_CONTENT_MAX = 2  # 재검색용. 게이트가 이미 한 번 막은 뒤라 1차보다 한 칸 넉넉하다
 
 # ── JS↔파이썬 함정 ①: 단어 경계 ─────────────────────────────────────────────
 # JS 정규식의 `\b` 는 ASCII 기준이라 한글 옆에서는 항상 경계가 서지만, 파이썬 `re` 는
@@ -126,6 +139,11 @@ _REF = re.compile("(?:그것|그거|그건|그걸|그게|이것|이거|이건|�
                   "거기|저기|여기|아까|방금)" + _PART)
 # CONN(담화 접속부사) — 앞 차례를 잇기만 할 뿐 가리키지 않는다. 방아쇠가 **아니다**.
 _CONN = re.compile("(?:그럼|그러면|그래서|그런데|근데|그리고|그래|그러니까)")
+# CONT(이어달라는 말) — 2026-09-16 추가. 앞 차례를 **되풀이해 달라는 요청**이라 주제어를
+# 담지 않는다. REF(가리킨다)·CONN(잇는다)과 성질이 다르다. 굴절형은 손으로 나열한다 —
+# 어간에 대고 맞추면 "더라"→"더" 처럼 엉뚱한 말이 걸리므로 **원형(run)** 에 대고 맞춘다.
+_CONT = re.compile("(?:자세히|자세하게|자세한|상세히|상세하게|상세한|더자세히|"
+                   "더|더더|좀더|조금더|계속|이어서|추가로|예시)")
 # FILL — 방아쇠는 아니지만 재작성할 때는 걷어내는 말. 지시관형사와 맨 관형사가 여기 온다.
 _FILL = re.compile("(?:그런|이런|저런|그|이|저)")
 
@@ -136,6 +154,10 @@ def is_ref(run):
 
 def is_conn(run):
     return _CONN.fullmatch(run) is not None
+
+
+def is_cont(run):
+    return _CONT.fullmatch(run) is not None
 
 
 def stems(q):
@@ -158,15 +180,21 @@ def stems(q):
     return out
 
 
-def content_words(q):
+def content_words(q, drop_cont=False):
     """내용어 = 지시어도 골격어도 아닌 2자 이상 어간 (중복 제거, 등장 순서 유지).
 
     영문은 **원형**을 그대로 돌려준다 — 검색 질문에 다시 넣을 때 "JWT" 가 "jwt" 로
     뭉개지지 않게. (중복 판정은 소문자 어간으로 한다.)
+
+    drop_cont 를 켜면 CONT 도 함께 뺀다. **기본값은 지금까지와 한 글자도 다르지 않다** —
+    단발 질문의 ctxTopic/ctxContentWords 가 바이트 그대로 남아야 해서다. 켜는 곳은 두
+    군데뿐이고 둘 다 후속일 때만 도는 자리다(규칙 ③ 판정 · 재작성 topic).
     """
     out, seen = [], set()
     for run, t, latin in stems(q):
         if is_ref(run) or is_conn(run):
+            continue
+        if drop_cont and is_cont(run):
             continue
         if len(t) < 2 or t in STOP:
             continue
@@ -184,6 +212,10 @@ def has_conn(q):
     return any(is_conn(run) for run, _t, _l in stems(q))
 
 
+def has_cont(q):
+    return any(is_cont(run) for run, _t, _l in stems(q))
+
+
 def strip_deictic(q):
     """지시어 낱말을 통째로 걷어낸 나머지 — 재작성의 뼈대가 된다.
 
@@ -192,7 +224,11 @@ def strip_deictic(q):
     """
     s = _js_str(q)
     for run, _t, _l in stems(q):
-        if is_ref(run) or is_conn(run) or _FILL.fullmatch(run):
+        # CONT 는 **2자 이상일 때만** 걷어낸다. 이건 정규식이 아니라 부분 문자열 치환이라
+        # 한 글자 "더" 를 지우면 같은 문장의 "더미데이터" 까지 "미데이터" 로 깎인다.
+        # 한 글자를 남겨도 잃는 게 없다 — 어간이 1자라 어차피 내용어가 아니다.
+        cont2 = is_cont(run) and len(run) >= 2
+        if is_ref(run) or is_conn(run) or cont2 or _FILL.fullmatch(run):
             s = s.replace(run, " ")
     return _trim(_WS_LEAD.sub("", _WS_RUN.sub(" ", s)))
 
@@ -221,27 +257,62 @@ def rewrite_node(question, sess=None):
     words = content_words(question)
     ref = has_ref(question)
     conn = has_conn(question)
-    # 후속 판정 — 둘 중 하나
+    cont = has_cont(question)
+    # 내용어에서 CONT 를 뺀 나머지 = 이번 질문이 **스스로 들고 온 주제**.
+    own_topic = len(content_words(question, True)) if cont else len(words)
+    # 후속 판정 — 셋 중 하나
     #   ① 내용어가 아예 없다 (접속부사만 있어도 해당)
     #   ② REF 가 있고 내용어가 CONTENT_MAX 이하
-    needy = len(words) == 0 or (ref and len(words) <= CONTENT_MAX)
+    #   ③ CONT 가 있고 내용어가 **전부** CONT (문턱은 개수가 아니라 0이다)
+    needy = (len(words) == 0 or (ref and len(words) <= CONTENT_MAX)
+             or (cont and own_topic == 0))
     is_follow_up = alive and needy
+
+    def _rewrite():
+        """1차 판정과 재검색이 **같은 함수**를 쓴다 (배포 JS 의 rewrite())."""
+        # 직전 주제어: 직전 질문에서 뽑되, 직전 질문도 후속이었다면 이월된 topic 을 쓴다.
+        # CONT 를 빼고 뽑는다 — 직전 질문이 `더 자세히 알려줘` 였으면 주제어가 "자세히" 로
+        # 잡혀 그 오염이 다음 턴으로 번진다(실행 2995 가 실제로 그랬다).
+        topic = " ".join(content_words(prev_q, True)[:MAX_TOPIC])
+        if not topic:
+            topic = prev_topic
+        # 질문이 **이미 들고 있는** 주제어는 빼고 붙인다. 안 그러면
+        # `judge 더 자세히 알려줘` 의 재검색이 `judge judge 더 알려줘` 가 되어 같은 낱말이
+        # 두 번 들어가고 임베딩이 그쪽으로 쏠린다(2026-09-18 실측: 표본 5개 전부에서
+        # best2mean 이 0.03~0.08 나빠졌다). 재검색은 게이트가 이미 막은 뒤에만 도는
+        # 경로라 그 폭이 당락을 가른다.
+        # **빼기만 한다** — 없던 낱말을 넣지 않으므로 겹치지 않는 질문은 한 글자도 안 바뀐다.
+        own = {w.lower() for w in content_words(question)}
+        topic = " ".join(w for w in topic.split() if w and w.lower() not in own)
+        rest = strip_deictic(question)
+        q = _trim(_WS_PUNCT.sub(r"\1", _WS_RUN.sub(" ", topic + " " + rest))) or question
+        block = ("[대화 맥락 — 바로 앞 차례]\n"
+                 "이전 질문: " + prev_q + "\n"
+                 + ("이전 답변 요지: " + prev_lead + "\n" if prev_lead else "")
+                 + "위 맥락을 참고해 아래 질문의 지시어(그것/그건/그럼 …)가"
+                   " 무엇을 가리키는지 판단하세요.\n\n")
+        return q, block
 
     search_question = question
     context_block = ""
     if is_follow_up:
-        # 직전 주제어: 직전 질문에서 뽑되, 직전 질문도 후속이었다면 이월된 topic 을 쓴다
-        topic = " ".join(content_words(prev_q)[:MAX_TOPIC])
-        if not topic:
-            topic = prev_topic
-        rest = strip_deictic(question)
-        search_question = _trim(_WS_PUNCT.sub(r"\1", _WS_RUN.sub(" ", topic + " " + rest))) \
-            or question
-        context_block = ("[대화 맥락 — 바로 앞 차례]\n"
-                         "이전 질문: " + prev_q + "\n"
-                         + ("이전 답변 요지: " + prev_lead + "\n" if prev_lead else "")
-                         + "위 맥락을 참고해 아래 질문의 지시어(그것/그건/그럼 …)가"
-                           " 무엇을 가리키는지 판단하세요.\n\n")
+        search_question, context_block = _rewrite()
+
+    # ── 재검색용 예비 재작성 — 1차 검색에는 쓰이지 않는다 ────────────────────
+    # 1차에서 이미 재작성했다면 재검색해 봐야 같은 질문이라 뜻이 없다.
+    # CONT 도 여기서는 방아쇠다 — 1차 규칙 ③ 은 "내용어가 전부 CONT" 일 때만 걸리므로
+    # `judge 더 자세히 알려줘`(내용어 1개 + CONT)는 1차에서 일부러 흘려보낸다.
+    # CONT 방아쇠에만 own_topic <= 1 을 더 건다: CONT 낱말은 비교 부사로도 쓰여서
+    # (`더 빠른 인덱스 뭐 있어?`) 개수 문턱만으로는 새 질문까지 걸린다.
+    retry_needy = (alive and not is_follow_up
+                   and ((ref or conn) or (cont and own_topic <= 1))
+                   and len(words) <= RETRY_CONTENT_MAX)
+    ctx_retry_question = ""
+    ctx_retry_context = ""
+    if retry_needy:
+        q, block = _rewrite()
+        if q != search_question:
+            ctx_retry_question, ctx_retry_context = q, block
 
     # 이월 topic — 이번 턴이 무엇에 관한 것이었는지. 후속이면 직전 것을 물려받는다.
     carry = " ".join(content_words(search_question)[:MAX_TOPIC]) or prev_topic
@@ -259,6 +330,10 @@ def rewrite_node(question, sess=None):
         "ctxRef": ref,
         "ctxConn": conn,
         "ctxContentWords": len(words),
+        # ↓ 재검색 전용. ② `재검색 판정` 이 게이트 결과를 보고 쓴다.
+        "ctxCanRetry": bool(ctx_retry_question),
+        "ctxRetryQuestion": ctx_retry_question,
+        "ctxRetryContext": ctx_retry_context,
     }
 
 
@@ -359,6 +434,31 @@ if __name__ == "__main__":      # 모델을 부르지 않지만 습관을 지킨
         ("그건 왜 비싸?", None, False, "세션 없음"),
         ("그건 왜 비싸?", {"question": "", "topic": "리랭킹", "age_s": 5}, False,
          "직전 질문이 비었다 — alive 아님"),
+        # ── CONT (규칙 ③) — 2026-09-16. rag_refusals 44·45·46 이 근거다 ──────────
+        ("더 자세히 알려줘", PREV, True, "규칙 ③ — 내용어가 전부 CONT (거절 44)"),
+        ("자세히", PREV, True, "규칙 ③ — CONT 하나뿐"),
+        ("계속", PREV, True, "규칙 ③ — CONT 하나뿐"),
+        ("예시?", PREV, True, "규칙 ③ — CONT 하나뿐"),
+        ("좀 더 알려줘", PREV, True, "규칙 ① 이 이미 잡는다(좀·알려줘=STOP, 더=1자)"),
+        ("임베딩 더 자세히 알려줘", PREV, False,
+         "**오염 경계** — 새 주제 1개 + CONT. 1차 방아쇠는 안 걸린다(거기 리랭킹을 붙이면 안 된다)"),
+        ("judge 더 자세히 알려줘", PREV, False,
+         "새 주제 1개 + CONT — 1차는 흘려보내고 게이트가 막으면 재검색이 구제한다 (거절 45·46)"),
+        ("계속 에러나는데 왜 그래?", PREV, False, "CONT 낱말이 부사로 쓰인 새 질문"),
+        ("더 빠른 인덱스 뭐 있어?", PREV, False, "'더' 가 비교 부사 — 스스로 주제 2개를 들고 왔다"),
+        # ── 주제어 중복 (2026-09-18) ────────────────────────────────────────
+        ("리랭킹 더 자세히 알려줘", PREV, False,
+         "스스로 들고 온 주제 1개 + CONT — 1차는 흘려보낸다(주제가 앞 차례와 같은 말이어도)"),
+    ]
+    # 재검색 자격도 함께 본다 — 1차에서 흘려보낸 것을 게이트 뒤에서 누가 받나
+    RETRY = [
+        ("judge 더 자세히 알려줘", PREV, True, "CONT + 스스로 들고 온 주제 1개 → 재검색 자격"),
+        ("임베딩 더 자세히 알려줘", PREV, True, "같은 규칙. 게이트를 통과하면 재검색은 안 돈다"),
+        ("더 빠른 인덱스 뭐 있어?", PREV, False, "스스로 들고 온 주제 2개 → 자격 없음"),
+        ("리랭킹 알려줘", PREV, False, "REF/CONN/CONT 가 하나도 없다 → 절대 대상이 아니다"),
+        # 주제어가 질문에 이미 있으면 **두 번 붙이지 않는다**. 이 줄이 없으면
+        # "리랭킹 리랭킹 더 알려줘" 로 돌아간다(2026-09-18 실측: best2mean 0.3847 → 0.4308).
+        ("리랭킹 더 자세히 알려줘", PREV, True, "주제어가 이미 질문에 있다 → 중복 없이 붙는다"),
     ]
     bad = 0
     print(f"{'질문':32s} {'age_s':>9s}  {'후속':5s} {'검색용 질문':28s} 근거")
@@ -368,4 +468,11 @@ if __name__ == "__main__":      # 모델을 부르지 않지만 습관을 지킨
         bad += not ok
         print(f"{q:32s} {str((prev or {}).get('age_s')):>9s}  "
               f"{str(r['followUp']):5s} {r['question']:28s} {'' if ok else '❌ '}{why}")
+    print(f"\n{'질문':32s} {'재검색자격':10s} {'재검색 질문':28s} 근거")
+    for q, prev, want, why in RETRY:
+        r = rewrite(q, prev)
+        ok = r["ctxCanRetry"] == want
+        bad += not ok
+        print(f"{q:32s} {str(r['ctxCanRetry']):10s} {r['ctxRetryQuestion']:28s} "
+              f"{'' if ok else '❌ '}{why}")
     sys.exit(1 if bad else 0)

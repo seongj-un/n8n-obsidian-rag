@@ -48,7 +48,12 @@ GATE_KEYS = ('grounded', 'best', 'best2mean', 'spread', 'nearest', 'sourcesLine'
              'lexHit', 'lexTokens')
 PICK_KEYS = ('pickedNotes', 'pickedChunks', 'ctxChars', 'sourcesLine', 'pickBand', 'pickCompare')
 CTX_KEYS = ('question', 'rawQuestion', 'contextBlock', 'ctxFollowUp', 'ctxTopic',
-            'ctxAgeS', 'ctxPrevQuestion', 'ctxRef', 'ctxConn', 'ctxContentWords')
+            'ctxAgeS', 'ctxPrevQuestion', 'ctxRef', 'ctxConn', 'ctxContentWords',
+            # 2026-09-15 재검색 패치. 1차 검색에는 안 쓰이지만 어긋나면 ② 의 되물음이
+            # 하네스와 다른 질문으로 돈다 — 대조 대상에 넣는다.
+            'ctxCanRetry', 'ctxRetryQuestion', 'ctxRetryContext')
+# ② 의 재검색 분기. 배선이 사라지면 "게이트가 막으면 되묻는다" 가 조용히 꺼진다.
+RETRY_NODES = ('재검색 판정', 'RAG 코어(재검색)', '결과 고르기')
 
 
 def api_key():
@@ -359,12 +364,39 @@ def main():
                 emb_bad.append(name)
             print(f"④ 속 ② 원문 `{name}` 바이트 일치: {'예' if same else '**아니오 — 갈라졌다**'}")
 
+    # 2026-09-15: ② 의 게이트 되물음 재검색이 살아 있는가. 노드나 배선이 사라지면
+    # `맥락 재작성` 이 내놓는 ctxRetryQuestion 을 아무도 쓰지 않게 되고, 후속 질문은
+    # 조용히 패치 전으로 돌아간다. 코드 대조로는 안 잡히므로 구조를 직접 본다.
+    c2 = wf2['connections']
+    have2 = {n['name'] for n in wf2['nodes']}
+    miss = [n for n in RETRY_NODES if n not in have2]
+
+    def _edge(f, t, i=0):
+        try:
+            return any(e['node'] == t for e in c2[f]['main'][i])
+        except Exception:
+            return False
+
+    wires = [('RAG 코어', '재검색 판정', 0), ('재검색 판정', 'RAG 코어(재검색)', 0),
+             ('재검색 판정', '답변 정리', 1), ('RAG 코어(재검색)', '결과 고르기', 0),
+             ('결과 고르기', '답변 정리', 0)]
+    cut = [f'{f}[{i}]→{t}' for f, t, i in wires if not _edge(f, t, i)]
+    retry_bad = bool(miss or cut)
+    print('② 재검색 분기 살아 있음: ' + ('예' if not retry_bad else
+          '**아니오 — 없는 노드 %s · 끊긴 배선 %s**' % (miss or '-', cut or '-')))
+
     # 2026-09-15: `거절 기록`(② 거절 질문 로그)이 토크나이저를 3번째로 복제한다.
     # 갈라지면 주간 요약의 집계 키가 게이트와 다른 말을 하게 된다.
     def _tok_block(js):
         m = re.search(r'const TAILS = \[(.*?)\];.*?const STOP = new Set\(\((.*?)\)\.split', js, re.S)
         return (m.group(1), m.group(2)) if m else None
     blocks = {n: _tok_block(code[n]) for n in ('근거 판정', '맥락 재작성', '거절 기록') if code.get(n)}
+    # 2026-09-18: ④ `Record` 가 토크나이저를 **네 번째로** 복제한다. `sameTopic` 을 모델에서
+    # 떼어내 코드로 재려면(질문 내용어가 답변에 나오는가) 게이트와 **같은 어휘 기준**이어야 한다.
+    # 갈라지면 채점의 관련성이 게이트·거절표와 다른 말을 하고, 그걸 알려줄 사람이 없다.
+    blocks4 = _tok_block(js_of(wf4).get('Record') or '')
+    if blocks4:
+        blocks['④ Record'] = blocks4
     if len(blocks) >= 2:
         ok = len(set(map(str, blocks.values()))) == 1
         print(f"토크나이저 {len(blocks)}사본 일치: {'예' if ok else '**아니오 — 갈라졌다**'}")
@@ -374,9 +406,10 @@ def main():
     def _selfref(js):
         m = re.search(r'/찾지\\s\*못했.*?/', js)
         return m.group(0) if m else None
-    a, b = _selfref(code.get('거절 기록') or ''), _selfref(js_of(wf4).get('Record') or '')
-    if a and b:
-        print(f"selfRefused 정규식 2사본 일치: {'예' if a == b else '**아니오 — 갈라졌다**'}")
+    # `a` 는 argparse 네임스페이스다 — 여기서 덮으면 아래 `a.limit` 이 죽는다.
+    sref2, sref4 = _selfref(code.get('거절 기록') or ''), _selfref(js_of(wf4).get('Record') or '')
+    if sref2 and sref4:
+        print(f"selfRefused 정규식 2사본 일치: {'예' if sref2 == sref4 else '**아니오 — 갈라졌다**'}")
 
     # JS 를 못 받았는데 조용히 통과하는 일이 없게 한다 (None 끼리 같다고 나오던 구멍)
     missing = [n for n in ('근거 판정', '노트 선별', '답변 정리', '맥락 재작성') if not code.get(n)]
@@ -395,7 +428,15 @@ def main():
         print(f"②T 를 못 읽었다({e}) — 맥락 표본은 ② 실행 기록만 쓴다")
 
     cases, texts = fixtures(a.limit)
-    ctxs = ctx_fixtures(a.limit) + ctx_fixtures_wf4(a.limit)
+    ctx4 = ctx_fixtures_wf4(a.limit)
+    ctxs = ctx_fixtures(a.limit) + ctx4
+    # ④ 는 ② 의 **재검색 분기를 재생하지 않는다** — `후속 턴 준비` 뒤에 코어를 한 번만
+    # 부른다. 지금 골든 2턴 6문항은 전부 1차에서 재작성돼(ctxCanRetry=False) 차이가 없다.
+    # CONN 형 후속("그러면 많이 비쌈?")을 골든에 넣는 순간 ④ 점수는 ② 보다 낮게 나온다.
+    stale4 = [c for c in ctx4 if (c['recorded'] or {}).get('ctxCanRetry')]
+    if stale4:
+        print('⚠️  ④ 2턴 표본 %d건이 재검색 대상이다 — ④ 는 재검색을 재생하지 않으므로 '
+              '그 문항의 점수는 ② 를 대변하지 않는다. ④ 에도 같은 분기를 넣어라.' % len(stale4))
     print(f"표본 — 게이트/선별 {len(cases)}건 · 정리 {len(texts)}건 · 맥락 {len(ctxs)}건")
     if not cases:
         print('실행 기록이 없다. ./fetch-db.sh 로 최신 사본을 받아라.')
@@ -462,7 +503,7 @@ def main():
             for key in CTX_KEYS:
                 if js['ctx'][i].get(key) != py.get(key):
                     print(f"   {key}\n     js: {js['ctx'][i].get(key)!r}\n     py: {py.get(key)!r}")
-    failed = bool(bad_g or bad_p or bad_t or bad_c or emb_bad)
+    failed = bool(bad_g or bad_p or bad_t or bad_c or emb_bad or retry_bad)
     print('\n' + ('⚠️  어긋났다 — 벤치 결과를 믿지 말고 배포 JS 를 다시 옮겨라.'
                   if failed else '✅ 완전 일치 — 하네스가 배포본을 대변한다.'))
     return 1 if failed else 0

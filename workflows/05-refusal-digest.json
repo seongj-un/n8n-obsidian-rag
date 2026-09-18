@@ -6,12 +6,8 @@
         "rule": {
           "interval": [
             {
-              "field": "weeks",
-              "triggerAtDay": [
-                1
-              ],
-              "triggerAtHour": 9,
-              "triggerAtMinute": 0
+              "field": "hours",
+              "hoursInterval": 6
             }
           ]
         }
@@ -81,7 +77,10 @@
           "name": "Discord - PR Alerts Webhook"
         }
       },
-      "webhookId": "f5a21ebd-35a6-482a-b357-7d7033cbf8c3"
+      "webhookId": "f5a21ebd-35a6-482a-b357-7d7033cbf8c3",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -147,6 +146,42 @@
       "name": "수동 실행",
       "webhookId": "f4d5e6a7-0000-4000-8000-0000000000cc",
       "notes": "주 1회를 기다리지 않고 돌려 보려고 둔다. curl -XPOST localhost:5678/webhook/refusal-digest-now"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO n8n_schedule_state (job, last_ok)\nVALUES ($1, now())\nON CONFLICT (job) DO UPDATE SET last_ok = now()\nWHERE n8n_schedule_state.last_ok < now() - interval '6 days 18 hours'   -- 요약 창이 now()-7d 라, 7일로 두면 6시간 늦게 뜰 때\n                                        -- (now, now-7d] 와 직전 회차 사이에 최대 6시간 빈틈이\n                                        -- 생겨 그 사이 거절이 통째로 누락된다. 당겨서 겹치게 한다.\nRETURNING job, last_ok;",
+        "options": {
+          "queryReplacement": "wf5-refusal-digest"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        180,
+        440
+      ],
+      "name": "주간 차례 확인",
+      "credentials": {
+        "postgres": {
+          "id": "3kFMNEUFEXo3asRo",
+          "name": "Postgres account"
+        }
+      },
+      "id": "16f1d7ca-f98a-405b-a48a-d902f5b39426"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 주기 작업의 \"지금이 차례인가\" 게이트.\n//\n// 이 맥북은 00~06시 KST 에 자서 **고정 시각 스케줄이 한 번도 뜬 적이 없다**\n// (2026-09-18 실측: 14일 보존 기간 안에 ④·⑤ 의 trigger 모드 실행 0건.\n//  가동률이 가장 높은 22시도 64% 라 어느 고정 시각도 안전하지 않다).\n//\n// 그래서 6시간마다 뜨고, 앞의 `주간 차례 확인` 이 차례를 **원자적으로** 집는다:\n// 7일이 안 지났으면 그 INSERT ... ON CONFLICT ... WHERE 가 0행을 돌려주고,\n// 여기서 걸러져 아래로 아무것도 안 내려간다. 조회하고 나서 쓰는(check-then-act)\n// 방식이 아니라 한 쿼리라 동시 실행이 겹쳐도 두 번 돌지 않는다.\n//\n// 수동 실행(웹훅) 경로는 이 게이트를 **지나지 않는다** — 언제든 바로 돈다.\nreturn $input.all().filter((i) => i && i.json && i.json.job);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        440
+      ],
+      "name": "차례일 때만",
+      "id": "63c75f1a-1da1-4a7e-b61e-fc733a4bf783"
     }
   ],
   "connections": {
@@ -154,7 +189,7 @@
       "main": [
         [
           {
-            "node": "지난 7일 거절",
+            "node": "주간 차례 확인",
             "type": "main",
             "index": 0
           }
@@ -211,6 +246,28 @@
       ]
     },
     "수동 실행": {
+      "main": [
+        [
+          {
+            "node": "지난 7일 거절",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "주간 차례 확인": {
+      "main": [
+        [
+          {
+            "node": "차례일 때만",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "차례일 때만": {
       "main": [
         [
           {

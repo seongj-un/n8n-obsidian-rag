@@ -16,6 +16,10 @@ work-in-progress/
 # 워크플로 수정 전 스냅샷. 되돌리기용이라 로컬에만 둔다.
 backup/
 
+# docker-compose 수정 전 스냅샷. 같은 이유로 로컬에만 둔다.
+docker-compose.yml.bak-*
+docker-compose.yml.pre-*
+
 # 벤치 실험 산출물 (모델 출력·중간 JSON)
 bench/A*.json
 bench/B*.json

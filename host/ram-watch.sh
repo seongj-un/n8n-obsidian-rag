@@ -17,6 +17,11 @@ THRESHOLD="${RAM_REAL_FREE_THRESHOLD:-12}"   # 실여유 % 하한
 # 압박/회복이 번갈아 뜬다 — 들어가는 선과 나오는 선을 벌려 둔다.
 HYSTERESIS="${RAM_REAL_FREE_HYSTERESIS:-3}"
 STATE="${HOME}/.local/state/n8n-ram-watch.state"
+# 스왑은 램과 따로 상태를 든다. 스왑은 램이 풀린 뒤에도 몇 시간씩 안 줄어서,
+# 한 상태로 묶으면 스왑이 높은 동안 램 압박/회복이 가려진다.
+SWAP_THRESHOLD_GB="${SWAP_THRESHOLD_GB:-8}"     # 이 이상 쓰면 알림
+SWAP_HYSTERESIS_GB="${SWAP_HYSTERESIS_GB:-2}"   # 하한 - 이만큼 아래로 내려와야 회복
+SWAP_STATE="${HOME}/.local/state/n8n-ram-watch.swap.state"
 
 mkdir -p "${STATE:h}"
 
@@ -68,14 +73,33 @@ reasons=()
 
 if (( ${#reasons} > 0 )); then now=alert; else now=ok; fi
 
-[[ "$now" == "$prev" ]] && exit 0     # 상태 전환일 때만 — 5분마다 도배하지 않는다
-
+# ── 스왑 사용량 ──────────────────────────────────────────────────────────────
+# vm.swapusage: "total = 5120.00M  used = 3805.56M  free = ..." — 단위는 M 이 기본이지만
+# G 로 나오는 경우에도 MB 로 맞춘다. 못 읽으면 -1 → 이 조건은 빠진다.
 swap=$(sysctl -n vm.swapusage 2>/dev/null | sed 's/^ *//')
+swap_used_mb=$(print -r -- "$swap" | awk '{
+  if (match($0, /used = [0-9.]+[MG]/)) {
+    v = substr($0, RSTART + 7, RLENGTH - 8); u = substr($0, RSTART + RLENGTH - 1, 1)
+    printf "%d", (u == "G" ? v * 1024 : v); exit
+  }
+  print -1 }')
+
+swap_prev=$(cat "$SWAP_STATE" 2>/dev/null || echo ok)
+swap_limit_gb=$SWAP_THRESHOLD_GB
+[[ "$swap_prev" == alert ]] && swap_limit_gb=$(( SWAP_THRESHOLD_GB - SWAP_HYSTERESIS_GB ))
+if (( swap_used_mb >= swap_limit_gb * 1024 )); then swap_now=alert; else swap_now=ok; fi
+swap_used_gb=$(( swap_used_mb < 0 ? 0 : swap_used_mb )); swap_used_gb=$(printf '%.1f' $(( swap_used_gb / 1024.0 )))
+
+# 상태 전환일 때만 — 5분마다 도배하지 않는다
+[[ "$now" == "$prev" && "$swap_now" == "$swap_prev" ]] && exit 0
 
 # 프로세스 목록(ps)은 안 싣는다 — wired 와 압축기가 어느 프로세스에도 안 잡혀서
 # 상위 몇 개를 더해도 실제 사용량의 일부밖에 설명하지 못한다. 대신 내역을 싣는다.
-payload=$(EV="$now" REALFREE="$real_free" LEVEL="$level" SWAP="$swap" \
-          REASON="${(j:, :)reasons}" \
+# $1 이벤트 이름, $2 헤드라인 사유, $3 상태 파일, $4 새 상태
+send() {
+local payload
+payload=$(EV="$1" REALFREE="$real_free" LEVEL="$level" SWAP="$swap" \
+          REASON="$2" SWAPGB="$swap_used_gb" \
           PWIRED="$p_wired" PANON="$p_anon" PCOMPR="$p_compr" \
           PAGESIZE="$page_size" TOTALPAGES="$total_pages" python3 -c '
 import json, os, datetime, unicodedata
@@ -107,11 +131,12 @@ else:
     breakdown = "vm_stat 을 읽지 못했다 — 내역 없음"
 
 print(json.dumps({
-    "event":       "recovered" if os.environ["EV"] == "ok" else "pressure",
+    "event":       os.environ["EV"],
     "realFreePct": int(os.environ["REALFREE"]),
     "level":       os.environ["LEVEL"],
     "reason":      os.environ["REASON"],
     "swap":        os.environ["SWAP"],
+    "swapUsedGB":  float(os.environ["SWAPGB"]),
     "breakdown":   breakdown,
     "at":          datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 }, ensure_ascii=False))')
@@ -119,7 +144,20 @@ print(json.dumps({
 # POST 가 실패하면 상태를 쓰지 않는다 — n8n 이 내려가 있었다면 다음 번에 다시 시도한다.
 if curl -fsS --max-time 10 -X POST "$HOOK" \
         -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1; then
-  printf '%s' "$now" > "$STATE"
+  printf '%s' "$4" > "$3"
 else
-  print -r -- "$(date '+%F %T') POST 실패 ($now, 여유 ${real_free}%) — 상태 보류" >&2
+  print -r -- "$(date '+%F %T') POST 실패 ($1, 여유 ${real_free}%, 스왑 ${swap_used_gb}GB) — 상태 보류" >&2
+fi
+}
+
+if [[ "$now" != "$prev" ]]; then
+  if [[ "$now" == alert ]]; then send pressure "${(j:, :)reasons}" "$STATE" alert
+  else                           send recovered "" "$STATE" ok; fi
+fi
+if [[ "$swap_now" != "$swap_prev" ]]; then
+  if [[ "$swap_now" == alert ]]; then
+    send swap "스왑 ${swap_used_gb}GB ≥ ${SWAP_THRESHOLD_GB}GB" "$SWAP_STATE" alert
+  else
+    send swap_recovered "스왑 ${swap_used_gb}GB < ${swap_limit_gb}GB" "$SWAP_STATE" ok
+  fi
 fi

@@ -38,7 +38,7 @@
       },
       "parameters": {
         "authentication": "webhook",
-        "content": "={{ $json.body.event === 'recovered' ? '🟢 **호스트 램 회복** · 여유 ' + $json.body.realFreePct + '%' : '🟠 **호스트 램 압박** · ' + $json.body.reason }}\n\n**여유**: {{ $json.body.realFreePct }}%\n**압박 단계**: {{ $json.body.level }}\n**스왑**: {{ $json.body.swap }}\n**시각**: {{ $json.body.at }}\n\n```\n{{ $json.body.breakdown }}\n```",
+        "content": "={{ ({ recovered: '🟢 **호스트 램 회복** · 여유 ' + $json.body.realFreePct + '%', swap: '🟠 **호스트 스왑 과다** · ' + $json.body.reason, swap_recovered: '🟢 **호스트 스왑 회복** · ' + $json.body.reason })[$json.body.event] || '🟠 **호스트 램 압박** · ' + $json.body.reason }}\n\n**여유**: {{ $json.body.realFreePct }}%\n**압박 단계**: {{ $json.body.level }}\n**스왑**: {{ $json.body.swap }}\n**시각**: {{ $json.body.at }}\n\n```\n{{ $json.body.breakdown }}\n```",
         "options": {}
       },
       "notes": "③ 오류 알림과 같은 Discord Webhook 크리덴셜을 재활용한다.\n압박 헤드라인에는 '걸린 조건'(reason)이 들어간다 — 여유 % 만 띄우면\n커널 압박 단계로 터진 알림이 회복 메시지와 똑같아 보인다(실측 확인).\n'여유' 는 실여유 = 100 - (wired + 익명 + 압축기점유) / 전체.",

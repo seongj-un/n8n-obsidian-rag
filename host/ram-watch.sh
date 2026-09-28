@@ -13,6 +13,9 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
 HOOK="${N8N_HOOK:-http://localhost:5678/webhook/ram-alert}"
 THRESHOLD="${RAM_REAL_FREE_THRESHOLD:-12}"   # 실여유 % 하한
+# 회복은 하한보다 이만큼 더 비어야 인정한다. 여유가 13~14% 를 오가면 5분마다
+# 압박/회복이 번갈아 뜬다 — 들어가는 선과 나오는 선을 벌려 둔다.
+HYSTERESIS="${RAM_REAL_FREE_HYSTERESIS:-3}"
 STATE="${HOME}/.local/state/n8n-ram-watch.state"
 
 mkdir -p "${STATE:h}"
@@ -49,13 +52,22 @@ esac
 # ── 판정: 둘 중 하나라도 걸리면 압박 ─────────────────────────────────────────
 # 걸린 조건을 그대로 모아 헤드라인에 싣는다. 여유 % 만 띄우면 커널 압박 단계로
 # 터진 알림이 '여유 20%' 를 달고 나와 회복 메시지와 구분이 안 된다.
+#
+# 커널 단계는 critical 만 친다. warn 은 이 맥에서 평소에 수시로 켜졌다 꺼진다 —
+# 2026-09-17~28 알림 127건이 전부 warn 단독이었고(critical 0건), 그때 여유는
+# 압박 16~22% · 회복 16~22% 로 구분되지 않았다. 신호가 아니라 잡음이었다.
+prev=$(cat "$STATE" 2>/dev/null || echo ok)
+
+# 이미 압박 중이면 하한 + HYSTERESIS 를 넘어야 풀린다.
+limit=$THRESHOLD
+[[ "$prev" == alert ]] && limit=$(( THRESHOLD + HYSTERESIS ))
+
 reasons=()
-(( real_free < THRESHOLD )) && reasons+=("여유 ${real_free}% < ${THRESHOLD}%")
-(( lvl_num  >= 2 ))         && reasons+=("커널 압박 단계 ${level}")
+(( real_free < limit )) && reasons+=("여유 ${real_free}% < ${limit}%")
+(( lvl_num  >= 4 ))     && reasons+=("커널 압박 단계 ${level}")
 
 if (( ${#reasons} > 0 )); then now=alert; else now=ok; fi
 
-prev=$(cat "$STATE" 2>/dev/null || echo ok)
 [[ "$now" == "$prev" ]] && exit 0     # 상태 전환일 때만 — 5분마다 도배하지 않는다
 
 swap=$(sysctl -n vm.swapusage 2>/dev/null | sed 's/^ *//')

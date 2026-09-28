@@ -642,6 +642,37 @@
       ],
       "name": "질문 없음 안내",
       "id": "6be55786-6b63-4339-ba49-98a7701b51ec"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://discord.com/api/v10/channels/{{ $json.targetChannelId }}/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "discordBotTriggerApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.replyContent }) }}",
+        "options": {}
+      },
+      "name": "안내 보내기",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        -32
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "discordBotTriggerApi": {
+          "id": "UhhL8rQxShufZFQq",
+          "name": "Discord Bot Trigger account"
+        }
+      },
+      "notes": "질문이 비어 있을 때의 안내 전송. `Reply to Discord` 를 재사용하지 않는 이유 — 그 노드 뒤에 `세션 기록` 이 이어지고, 거기서 `$('맥락 재작성')` 을 참조한다. 안내 경로는 맥락 재작성을 지나지 않으므로 \"Node '맥락 재작성' hasn't been executed\" 로 실패한다(2026-09-28 실행 4403). `세션 기록` 은 parity 가 ④ 사본과 바이트 대조하는 노드라 건드리지 않고 여기서 끝낸다.",
+      "notesInFlow": true,
+      "id": "c14b0691-2fe6-428c-bbc1-a08a5c0eb0c4"
     }
   ],
   "connections": {
@@ -902,7 +933,7 @@
       "main": [
         [
           {
-            "node": "Reply to Discord",
+            "node": "안내 보내기",
             "type": "main",
             "index": 0
           }

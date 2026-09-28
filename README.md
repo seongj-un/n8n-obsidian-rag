@@ -96,6 +96,30 @@ tail -f /tmp/n8n-ram-watch.log
 - `ram-watch.sh` 를 고치면 **`install.sh` 를 다시 돌려야** 반영된다.
   레포가 `~/Desktop` 아래라 macOS TCC 가 막아서, launchd 는 레포 안의 파일을 직접 못 읽는다.
 
+## 강제로 지금 돌리기
+
+①·④·⑤ 는 고정 시각 스케줄이 이 맥북에서 안 뜨기 때문에(00~06시 KST 가동률 0%)
+**간격형 + 차례 게이트**로 돈다. ④·⑤ 는 차례가 아니면 `주간 차례 확인` 이 0행을 돌려
+아무것도 안 한다 — 그래서 손으로 돌리려면 둘 중 하나를 쓴다.
+
+```sh
+curl -X POST http://localhost:5678/webhook/eval-now             # ④ 답변 품질 평가 (약 9분)
+curl -X POST http://localhost:5678/webhook/refusal-digest-now    # ⑤ 거절 질문 주간 요약
+```
+
+웹훅 경로는 게이트를 지나지 않고, **차례 표(`n8n_schedule_state`)도 건드리지 않는다** —
+다음 자동 실행 주기에 영향이 없다.
+
+n8n UI 의 **Execute workflow** 버튼도 쓸 수 있다(`$execution.mode === 'test'` 면 게이트가
+통과시킨다). 다만 이 버튼은 차례 표를 갱신하므로 자동 실행이 그만큼 미뤄진다.
+
+차례를 직접 보거나 미루려면:
+
+```sh
+docker exec n8n-vectordb-1 psql -U n8n -d obsidian_rag -c \
+  "select job, last_ok at time zone 'Asia/Seoul' from n8n_schedule_state;"
+```
+
 ## 워크플로 되돌리기
 
 ```sh
